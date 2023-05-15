@@ -15,20 +15,19 @@
     parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" ];
       imports = [ nci.flakeModule ];
-      perSystem = { pkgs, config, ... }:
-      let
-        # shorthand for accessing this crate's outputs
-        # you can access crate outputs under `config.nci.outputs.<crate name>` (see documentation)
-        out = config.nci.outputs.voxel-render;
-      in {
+      perSystem = { pkgs, config, ... }: {
         nci.projects.voxel = {
           relPath = "";
         };
         nci.crates.voxel-render = {
-          export = true;
+          runtimeLibs = with pkgs; [ vulkan-loader xorg.libX11 libxkbcommon wayland ];
         };
-        devShells.default = out.devShell;
-        packages.default = out.packages.release;
+        packages.default = config.nci.outputs.voxel-render.packages.release;
+        devShells.default = config.nci.outputs.voxel.devShell.overrideAttrs (old: {
+          nativeBuildInputs =
+            (old.nativeBuildInputs or [])
+            ++ (with pkgs; [ rust-analyzer ]);
+        });
       };
     };
 }
