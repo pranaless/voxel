@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use cgmath::{Deg, Matrix4, PerspectiveFov, SquareMatrix};
+use cgmath::{Deg, InnerSpace, Matrix4, PerspectiveFov, SquareMatrix, Vector3, Zero};
 use parking_lot::Mutex;
 use std::{
     ops::Deref,
@@ -7,7 +7,7 @@ use std::{
 };
 use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features};
 use winit::{
-    event::{Event, StartCause, WindowEvent},
+    event::{Event, KeyboardInput, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
@@ -128,6 +128,56 @@ impl Deref for Camera {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct PlayerInput {
+    pub forward: bool,
+    pub backward: bool,
+    pub leftward: bool,
+    pub rightward: bool,
+    pub upward: bool,
+    pub downward: bool,
+}
+impl PlayerInput {
+    pub fn update(&mut self, scancode: u32, pressed: bool) {
+        *(match scancode {
+            17 => &mut self.forward,
+            30 => &mut self.leftward,
+            31 => &mut self.backward,
+            32 => &mut self.rightward,
+            42 => &mut self.downward,
+            57 => &mut self.upward,
+            _ => return,
+        }) = pressed;
+    }
+
+    pub fn delta(&self) -> Option<Vector3<f64>> {
+        let mut delta = Vector3::<i32>::zero();
+        if self.leftward {
+            delta.x -= 1;
+        }
+        if self.rightward {
+            delta.x += 1;
+        }
+        if self.downward {
+            delta.y -= 1;
+        }
+        if self.upward {
+            delta.y += 1;
+        }
+        if self.backward {
+            delta.z += 1;
+        }
+        if self.forward {
+            delta.z -= 1;
+        }
+        if !delta.is_zero() {
+            delta.cast()
+        } else {
+            None
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
 
@@ -235,8 +285,10 @@ fn main() {
         near: 0.1,
         far: 100.0,
     };
-    let transform = Matrix4::from_translation(cgmath::Vector3::new(0.0, 0.0, 5.0));
+    let mut transform = Matrix4::from_translation(Vector3::new(0.0, 0.0, 5.0));
     camera.update_transform(&state.queue, transform);
+
+    let mut input = PlayerInput::default();
 
     let vertex = state
         .device
@@ -264,11 +316,17 @@ fn main() {
             state.window.request_redraw();
         }
         Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-            let _delta_time = {
+            let delta_time = {
                 let prev = std::mem::replace(&mut time, Instant::now());
                 *ctrl = ControlFlow::WaitUntil(time + step);
                 (time - prev).as_secs_f64()
             };
+
+            if let Some(delta) = input.delta() {
+                let delta = delta.normalize() * delta_time * 1.5;
+                transform = transform * Matrix4::from_translation(delta);
+            }
+            camera.update_transform(&state.queue, transform);
 
             state.window.request_redraw();
         }
@@ -280,6 +338,20 @@ fn main() {
             viewport.aspect = size.width as f64 / size.height as f64;
             camera.update_viewport(&state.queue, viewport.into());
         }
+        Event::WindowEvent {
+            event:
+                WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            state, scancode, ..
+                        },
+                    ..
+                },
+            ..
+        } => input.update(
+            scancode,
+            matches!(state, winit::event::ElementState::Pressed),
+        ),
         Event::RedrawRequested(_) => {
             let frame = state.surface.get_current_texture().unwrap();
             let view = frame.texture.create_view(&Default::default());
