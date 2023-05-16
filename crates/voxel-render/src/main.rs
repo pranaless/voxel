@@ -1,11 +1,14 @@
 use bytemuck::{Pod, Zeroable};
 use cgmath::{Deg, Matrix4, PerspectiveFov, SquareMatrix};
 use parking_lot::Mutex;
-use std::ops::Deref;
+use std::{
+    ops::Deref,
+    time::{Duration, Instant},
+};
 use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features};
 use winit::{
-    event::{Event, WindowEvent},
-    event_loop::EventLoop,
+    event::{Event, StartCause, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
 
@@ -251,7 +254,24 @@ fn main() {
             contents: bytemuck::cast_slice(INDICIES),
         });
 
+    let mut time = Instant::now();
+    let step = Duration::from_nanos(16_666_666);
+
     event_loop.run(move |event, _, ctrl| match event {
+        Event::NewEvents(StartCause::Init) => {
+            time = Instant::now();
+            *ctrl = ControlFlow::WaitUntil(time + step);
+            state.window.request_redraw();
+        }
+        Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+            let _delta_time = {
+                let prev = std::mem::replace(&mut time, Instant::now());
+                *ctrl = ControlFlow::WaitUntil(time + step);
+                (time - prev).as_secs_f64()
+            };
+
+            state.window.request_redraw();
+        }
         Event::WindowEvent {
             event: WindowEvent::Resized(size),
             ..
@@ -291,7 +311,7 @@ fn main() {
         Event::WindowEvent {
             event: WindowEvent::CloseRequested,
             ..
-        } => *ctrl = winit::event_loop::ControlFlow::Exit,
+        } => *ctrl = ControlFlow::Exit,
         _ => {}
     });
 }
