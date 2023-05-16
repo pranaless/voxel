@@ -1,5 +1,7 @@
 use bytemuck::{Pod, Zeroable};
-use cgmath::{Deg, InnerSpace, Matrix4, PerspectiveFov, SquareMatrix, Vector3, Zero};
+use cgmath::{
+    Deg, InnerSpace, Matrix, Matrix3, Matrix4, PerspectiveFov, SquareMatrix, Vector2, Vector3, Zero,
+};
 use parking_lot::Mutex;
 use std::{
     ops::Deref,
@@ -7,7 +9,7 @@ use std::{
 };
 use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features};
 use winit::{
-    event::{Event, KeyboardInput, StartCause, WindowEvent},
+    event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
@@ -289,6 +291,7 @@ fn main() {
     camera.update_transform(&state.queue, transform);
 
     let mut input = PlayerInput::default();
+    let mut tracking = false;
 
     let vertex = state
         .device
@@ -352,6 +355,28 @@ fn main() {
             scancode,
             matches!(state, winit::event::ElementState::Pressed),
         ),
+        Event::WindowEvent {
+            event: WindowEvent::CursorEntered { .. },
+            ..
+        } => tracking = true,
+        Event::WindowEvent {
+            event: WindowEvent::CursorLeft { .. },
+            ..
+        } => tracking = false,
+        Event::DeviceEvent {
+            event: DeviceEvent::MouseMotion { delta },
+            ..
+        } if tracking => {
+            let delta = 0.01 * Vector2::new(delta.0, -delta.1);
+            transform = transform * {
+                let r = delta.magnitude2();
+                let delta = (delta - delta * r / 6.0).extend(1.0 - r).normalize();
+
+                let s = Vector3::unit_y().cross(delta).normalize();
+                let u = delta.cross(s);
+                Matrix4::from(Matrix3::from_cols(s, u, delta).transpose())
+            };
+        }
         Event::RedrawRequested(_) => {
             let frame = state.surface.get_current_texture().unwrap();
             let view = frame.texture.create_view(&Default::default());
