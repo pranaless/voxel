@@ -5,13 +5,23 @@ struct VertexOutput {
     uv: vec2<f32>,
 }
 
+struct Camera {
+    viewport: mat4x4<f32>,
+    transform: mat4x4<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> camera: Camera;
+
 @vertex
 fn vs_main(
     @location(0) pos: vec3<f32>,
     @location(1) uv: vec2<f32>,
 ) -> VertexOutput {
     var output: VertexOutput;
-    output.pos = vec4<f32>(pos, 1.0);
+    output.pos = camera.viewport
+               * camera.transform
+               * vec4<f32>(pos, 1.0);
     output.uv = uv;
     return output;
 }

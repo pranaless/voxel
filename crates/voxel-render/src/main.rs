@@ -1,6 +1,8 @@
 use bytemuck::{Pod, Zeroable};
+use cgmath::{Deg, Matrix4, PerspectiveFov, SquareMatrix};
 use parking_lot::Mutex;
-use wgpu::{include_wgsl, util::DeviceExt, Features};
+use std::ops::Deref;
+use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
@@ -8,11 +10,14 @@ use winit::{
 };
 
 pub struct RenderState {
-    pub window: Window,
-    surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
 
+    camera_layout: wgpu::BindGroupLayout,
+    pipeline_layout: wgpu::PipelineLayout,
+
+    surface: wgpu::Surface,
+    pub window: Window,
     config: Mutex<wgpu::SurfaceConfiguration>,
     pub swapchain_format: wgpu::TextureFormat,
 }
@@ -67,6 +72,59 @@ const VERTICIES: &[Vertex] = &[
 
 const INDICIES: &[u32] = &[0, 1, 2];
 
+pub struct Camera {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+impl Camera {
+    pub fn new(state: &RenderState) -> Self {
+        let buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 128,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &state.camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        Camera { buffer, bind_group }
+    }
+
+    pub fn update_viewport(&self, queue: &wgpu::Queue, viewport: Matrix4<f64>) {
+        #[rustfmt::skip]
+        const OPENGL_TO_WGPU_MATRIX: Matrix4<f64> = Matrix4::new(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 0.5, 0.0,
+            0.0, 0.0, 0.5, 1.0,
+        );
+
+        let viewport = OPENGL_TO_WGPU_MATRIX * viewport;
+        let viewport: Matrix4<f32> = viewport.cast().unwrap();
+        let viewport: &[f32; 16] = viewport.as_ref();
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(viewport));
+    }
+
+    pub fn update_transform(&self, queue: &wgpu::Queue, transform: Matrix4<f64>) {
+        let transform = transform.invert().unwrap();
+        let transform: Matrix4<f32> = transform.cast().unwrap();
+        let transform: &[f32; 16] = transform.as_ref();
+        queue.write_buffer(&self.buffer, 64, bytemuck::cast_slice(transform));
+    }
+}
+impl Deref for Camera {
+    type Target = wgpu::BindGroup;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bind_group
+    }
+}
+
 fn main() {
     env_logger::init();
 
@@ -96,6 +154,25 @@ fn main() {
             .await
             .unwrap();
 
+        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&camera_layout],
+            push_constant_ranges: &[],
+        });
+
         let caps = surface.get_capabilities(&adapter);
         let config = Mutex::new(wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -106,11 +183,14 @@ fn main() {
             alpha_mode: caps.alpha_modes[0],
             view_formats: Vec::new(),
         });
+
         RenderState {
-            window,
-            surface,
             device,
             queue,
+            camera_layout,
+            pipeline_layout,
+            surface,
+            window,
             config,
             swapchain_format: caps.formats[0],
         }
@@ -120,19 +200,11 @@ fn main() {
         .device
         .create_shader_module(include_wgsl!("shader.wgsl"));
 
-    let pipeline_layout = state
-        .device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-
     let pipeline = state
         .device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
-            layout: Some(&pipeline_layout),
+            layout: Some(&state.pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
@@ -151,6 +223,17 @@ fn main() {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+
+    let camera = Camera::new(&state);
+
+    let mut viewport = PerspectiveFov {
+        fovy: Deg(45.0).into(),
+        aspect: 1.0,
+        near: 0.1,
+        far: 100.0,
+    };
+    let transform = Matrix4::from_translation(cgmath::Vector3::new(0.0, 0.0, 5.0));
+    camera.update_transform(&state.queue, transform);
 
     let vertex = state
         .device
@@ -174,6 +257,8 @@ fn main() {
             ..
         } => {
             state.resize(size.width, size.height);
+            viewport.aspect = size.width as f64 / size.height as f64;
+            camera.update_viewport(&state.queue, viewport.into());
         }
         Event::RedrawRequested(_) => {
             let frame = state.surface.get_current_texture().unwrap();
@@ -195,6 +280,7 @@ fn main() {
                     depth_stencil_attachment: None,
                 });
                 rpass.set_pipeline(&pipeline);
+                rpass.set_bind_group(0, &camera, &[]);
                 rpass.set_vertex_buffer(0, vertex.slice(..));
                 rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(0..3, 0, 0..1);
