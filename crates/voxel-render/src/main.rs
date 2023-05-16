@@ -1,5 +1,6 @@
+use bytemuck::{Pod, Zeroable};
 use parking_lot::Mutex;
-use wgpu::Features;
+use wgpu::{include_wgsl, util::DeviceExt, Features};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
@@ -9,9 +10,6 @@ use winit::{
 pub struct RenderState {
     pub window: Window,
     surface: wgpu::Surface,
-
-    instance: wgpu::Instance,
-    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
 
@@ -26,6 +24,48 @@ impl RenderState {
         self.surface.configure(&self.device, &config);
     }
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Zeroable, Pod)]
+pub struct Vertex {
+    pub pos: [f32; 3],
+    pub uv: [f32; 2],
+}
+impl Vertex {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: 20,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 12,
+                shader_location: 1,
+            },
+        ],
+    };
+}
+
+const VERTICIES: &[Vertex] = &[
+    Vertex {
+        pos: [-1.0, -1.0, 0.0],
+        uv: [0.0, 0.0],
+    },
+    Vertex {
+        pos: [1.0, -1.0, 0.0],
+        uv: [1.0, 0.0],
+    },
+    Vertex {
+        pos: [0.0, 1.0, 0.0],
+        uv: [0.5, 1.0],
+    },
+];
+
+const INDICIES: &[u32] = &[0, 1, 2];
 
 fn main() {
     env_logger::init();
@@ -57,29 +97,76 @@ fn main() {
             .unwrap();
 
         let caps = surface.get_capabilities(&adapter);
-        let size = window.inner_size();
-        let config = wgpu::SurfaceConfiguration {
+        let config = Mutex::new(wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: caps.formats[0],
-            width: size.width,
-            height: size.height,
+            width: 0,
+            height: 0,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
             view_formats: Vec::new(),
-        };
-        surface.configure(&device, &config);
-        let config = Mutex::new(config);
+        });
         RenderState {
             window,
             surface,
-            instance,
-            adapter,
             device,
             queue,
             config,
             swapchain_format: caps.formats[0],
         }
     });
+
+    let shader = state
+        .device
+        .create_shader_module(include_wgsl!("shader.wgsl"));
+
+    let pipeline_layout = state
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+    let pipeline = state
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::LAYOUT],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(state.swapchain_format.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+    let vertex = state
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            usage: wgpu::BufferUsages::VERTEX,
+            contents: bytemuck::cast_slice(VERTICIES),
+        });
+
+    let index = state
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            usage: wgpu::BufferUsages::INDEX,
+            contents: bytemuck::cast_slice(INDICIES),
+        });
 
     event_loop.run(move |event, _, ctrl| match event {
         Event::WindowEvent {
@@ -95,7 +182,7 @@ fn main() {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
-                let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: None,
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
@@ -107,6 +194,10 @@ fn main() {
                     })],
                     depth_stencil_attachment: None,
                 });
+                rpass.set_pipeline(&pipeline);
+                rpass.set_vertex_buffer(0, vertex.slice(..));
+                rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..3, 0, 0..1);
             }
             state.queue.submit(Some(encoder.finish()));
             frame.present();
