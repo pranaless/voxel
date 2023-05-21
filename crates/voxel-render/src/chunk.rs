@@ -83,6 +83,7 @@ impl ChunkPane {
                 col: Extent::new((i >> 4) & 0b1111, 0),
                 face: f,
             })
+            .filter(|q| q.face.0)
             .coalesce(|o, t| o.merge_row(t))
             .sorted_unstable_by_key(|v| v.row.start() << 4 | v.col.start())
             .coalesce(|o, t| o.merge_col(t))

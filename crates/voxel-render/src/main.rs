@@ -311,7 +311,7 @@ fn main() {
         }
 
         let mesh = ChunkMesh::new(&mesh);
-        mesh.quads().filter(|(_, f)| f.0).for_each(|(q, _f)| {
+        mesh.quads().for_each(|(q, _f)| {
             let i = vertex.len() as u32;
             vertex.extend_from_slice(&q);
             index.extend_from_slice(&[i, i + 1, i + 2, i + 2, i + 1, i + 3]);
