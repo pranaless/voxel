@@ -360,126 +360,130 @@ fn main() {
     let mut time = Instant::now();
     let step = Duration::from_nanos(16_666_666);
 
-    event_loop.run(move |event, _, ctrl| match event {
-        Event::NewEvents(StartCause::Init) => {
-            time = Instant::now();
-            *ctrl = ControlFlow::WaitUntil(time + step);
-            state.window.request_redraw();
-        }
-        Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-            let delta_time = {
-                let prev = std::mem::replace(&mut time, Instant::now());
+    event_loop.run(move |event, _, ctrl| {
+        let _ = (&depth,);
+
+        match event {
+            Event::NewEvents(StartCause::Init) => {
+                time = Instant::now();
                 *ctrl = ControlFlow::WaitUntil(time + step);
-                (time - prev).as_secs_f64()
-            };
-
-            if let Some(delta) = input.delta() {
-                let delta = delta.normalize() * delta_time * 1.5;
-                transform = transform * Matrix4::from_translation(delta);
+                state.window.request_redraw();
             }
-            camera.update_transform(&state.queue, transform);
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                let delta_time = {
+                    let prev = std::mem::replace(&mut time, Instant::now());
+                    *ctrl = ControlFlow::WaitUntil(time + step);
+                    (time - prev).as_secs_f64()
+                };
 
-            state.window.request_redraw();
-        }
-        Event::WindowEvent {
-            event: WindowEvent::Resized(size),
-            ..
-        } => {
-            state.resize(size.width, size.height);
-            depth = state.device.create_texture(&wgpu::TextureDescriptor {
-                label: None,
-                size: wgpu::Extent3d {
-                    width: size.width,
-                    height: size.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+                if let Some(delta) = input.delta() {
+                    let delta = delta.normalize() * delta_time * 1.5;
+                    transform = transform * Matrix4::from_translation(delta);
+                }
+                camera.update_transform(&state.queue, transform);
 
-            viewport.aspect = size.width as f64 / size.height as f64;
-            camera.update_viewport(&state.queue, viewport.into());
-        }
-        Event::WindowEvent {
-            event:
-                WindowEvent::KeyboardInput {
-                    input:
-                        KeyboardInput {
-                            state, scancode, ..
-                        },
-                    ..
-                },
-            ..
-        } => input.update(
-            scancode,
-            matches!(state, winit::event::ElementState::Pressed),
-        ),
-        Event::WindowEvent {
-            event: WindowEvent::CursorEntered { .. },
-            ..
-        } => tracking = true,
-        Event::WindowEvent {
-            event: WindowEvent::CursorLeft { .. },
-            ..
-        } => tracking = false,
-        Event::DeviceEvent {
-            event: DeviceEvent::MouseMotion { delta },
-            ..
-        } if tracking => {
-            let delta = 0.01 * Vector2::new(delta.0, -delta.1);
-            transform = transform * {
-                let r = delta.magnitude2();
-                let delta = (delta - delta * r / 6.0).extend(1.0 - r).normalize();
-
-                let s = Vector3::unit_y().cross(delta).normalize();
-                let u = delta.cross(s);
-                Matrix4::from(Matrix3::from_cols(s, u, delta).transpose())
-            };
-        }
-        Event::RedrawRequested(_) => {
-            let frame = state.surface.get_current_texture().unwrap();
-            let view = frame.texture.create_view(&Default::default());
-            let mut encoder = state
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                state.window.request_redraw();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                ..
+            } => {
+                state.resize(size.width, size.height);
+                depth = state.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                            store: true,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: true,
-                        }),
-                        stencil_ops: None,
-                    }),
+                    size: wgpu::Extent3d {
+                        width: size.width,
+                        height: size.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
                 });
-                rpass.set_pipeline(&pipeline);
-                rpass.set_bind_group(0, &camera, &[]);
-                rpass.set_vertex_buffer(0, vertex.slice(..));
-                rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                rpass.draw_indexed(0..index_len as u32, 0, 0..1);
+                depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+                viewport.aspect = size.width as f64 / size.height as f64;
+                camera.update_viewport(&state.queue, viewport.into());
             }
-            state.queue.submit(Some(encoder.finish()));
-            frame.present();
+            Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state, scancode, ..
+                            },
+                        ..
+                    },
+                ..
+            } => input.update(
+                scancode,
+                matches!(state, winit::event::ElementState::Pressed),
+            ),
+            Event::WindowEvent {
+                event: WindowEvent::CursorEntered { .. },
+                ..
+            } => tracking = true,
+            Event::WindowEvent {
+                event: WindowEvent::CursorLeft { .. },
+                ..
+            } => tracking = false,
+            Event::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta },
+                ..
+            } if tracking => {
+                let delta = 0.01 * Vector2::new(delta.0, -delta.1);
+                transform = transform * {
+                    let r = delta.magnitude2();
+                    let delta = (delta - delta * r / 6.0).extend(1.0 - r).normalize();
+
+                    let s = Vector3::unit_y().cross(delta).normalize();
+                    let u = delta.cross(s);
+                    Matrix4::from(Matrix3::from_cols(s, u, delta).transpose())
+                };
+            }
+            Event::RedrawRequested(_) => {
+                let frame = state.surface.get_current_texture().unwrap();
+                let view = frame.texture.create_view(&Default::default());
+                let mut encoder = state
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: true,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: true,
+                            }),
+                            stencil_ops: None,
+                        }),
+                    });
+                    rpass.set_pipeline(&pipeline);
+                    rpass.set_bind_group(0, &camera, &[]);
+                    rpass.set_vertex_buffer(0, vertex.slice(..));
+                    rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                    rpass.draw_indexed(0..index_len as u32, 0, 0..1);
+                }
+                state.queue.submit(Some(encoder.finish()));
+                frame.present();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *ctrl = ControlFlow::Exit,
+            _ => {}
         }
-        Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } => *ctrl = ControlFlow::Exit,
-        _ => {}
     });
 }
