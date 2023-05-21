@@ -2,6 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use cgmath::{
     Deg, InnerSpace, Matrix, Matrix3, Matrix4, PerspectiveFov, SquareMatrix, Vector2, Vector3, Zero,
 };
+use chunk::{ChunkMesh, Face, Sided};
 use parking_lot::Mutex;
 use std::{
     ops::Deref,
@@ -13,6 +14,8 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
+
+pub mod chunk;
 
 pub struct RenderState {
     device: wgpu::Device,
@@ -59,23 +62,6 @@ impl Vertex {
         ],
     };
 }
-
-const VERTICIES: &[Vertex] = &[
-    Vertex {
-        pos: [-1.0, -1.0, 0.0],
-        uv: [0.0, 0.0],
-    },
-    Vertex {
-        pos: [1.0, -1.0, 0.0],
-        uv: [1.0, 0.0],
-    },
-    Vertex {
-        pos: [0.0, 1.0, 0.0],
-        uv: [0.5, 1.0],
-    },
-];
-
-const INDICIES: &[u32] = &[0, 1, 2];
 
 pub struct Camera {
     buffer: wgpu::Buffer,
@@ -293,20 +279,60 @@ fn main() {
     let mut input = PlayerInput::default();
     let mut tracking = false;
 
+    let mut chunk = [[[false; 16]; 16]; 16];
+    for x in 0..16 {
+        for z in 0..16 {
+            let ym = ((x as f64 / 4.0).sin() * (z as f64 / 4.0).cos() * 6.0 + 8.0) as usize;
+            for y in 0..ym {
+                chunk[x][y][z] = true;
+            }
+        }
+    }
+
+    let mut vertex = Vec::<Vertex>::new();
+    let mut index = Vec::<u32>::new();
+
+    {
+        let mut mesh = [[[Default::default(); 16]; 16]; 16];
+        for x in 0..16 {
+            for y in 0..16 {
+                for z in 0..16 {
+                    let s = chunk[x][y][z];
+                    mesh[x][y][z] = Sided {
+                        neg_x: Face(s && (x == 0 || !chunk[x - 1][y][z])),
+                        pos_x: Face(s && (x == 15 || !chunk[x + 1][y][z])),
+                        neg_y: Face(s && (y == 0 || !chunk[x][y - 1][z])),
+                        pos_y: Face(s && (y == 15 || !chunk[x][y + 1][z])),
+                        neg_z: Face(s && (z == 0 || !chunk[x][y][z - 1])),
+                        pos_z: Face(s && (z == 15 || !chunk[x][y][z + 1])),
+                    };
+                }
+            }
+        }
+
+        let mesh = ChunkMesh::new(&mesh);
+        mesh.quads().filter(|(_, f)| f.0).for_each(|(q, _f)| {
+            let i = vertex.len() as u32;
+            vertex.extend_from_slice(&q);
+            index.extend_from_slice(&[i, i + 1, i + 2, i + 2, i + 1, i + 3]);
+        });
+    }
+
     let vertex = state
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             usage: wgpu::BufferUsages::VERTEX,
-            contents: bytemuck::cast_slice(VERTICIES),
+            contents: bytemuck::cast_slice(&vertex),
         });
 
+    let index_len = index.len();
     let index = state
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             usage: wgpu::BufferUsages::INDEX,
-            contents: bytemuck::cast_slice(INDICIES),
+            contents: bytemuck::cast_slice(&index),
         });
 
     let mut time = Instant::now();
@@ -400,7 +426,7 @@ fn main() {
                 rpass.set_bind_group(0, &camera, &[]);
                 rpass.set_vertex_buffer(0, vertex.slice(..));
                 rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                rpass.draw_indexed(0..3, 0, 0..1);
+                rpass.draw_indexed(0..index_len as u32, 0, 0..1);
             }
             state.queue.submit(Some(encoder.finish()));
             frame.present();
