@@ -8,7 +8,7 @@ use std::{
     ops::Deref,
     time::{Duration, Instant},
 };
-use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features};
+use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -216,7 +216,7 @@ fn main() {
 
         let caps = surface.get_capabilities(&adapter);
         let config = Mutex::new(wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: TextureUsages::RENDER_ATTACHMENT,
             format: caps.formats[0],
             width: 0,
             height: 0,
@@ -260,10 +260,32 @@ fn main() {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+
+    let mut depth = state.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let mut depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
     let camera = Camera::new(&state);
 
@@ -364,6 +386,22 @@ fn main() {
             ..
         } => {
             state.resize(size.width, size.height);
+            depth = state.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: size.width,
+                    height: size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
             viewport.aspect = size.width as f64 / size.height as f64;
             camera.update_viewport(&state.queue, viewport.into());
         }
@@ -420,7 +458,14 @@ fn main() {
                             store: true,
                         },
                     })],
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: true,
+                        }),
+                        stencil_ops: None,
+                    }),
                 });
                 rpass.set_pipeline(&pipeline);
                 rpass.set_bind_group(0, &camera, &[]);
