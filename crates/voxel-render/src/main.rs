@@ -2,7 +2,7 @@ use cgmath::{
     Deg, InnerSpace, Matrix, Matrix3, Matrix4, PerspectiveFov, SquareMatrix, Vector2, Vector3, Zero,
 };
 use chunk::{
-    render::{chunk_mesh, Face, Vertex},
+    render::{ChunkMesh, Face, Vertex},
     Sided,
 };
 use parking_lot::Mutex;
@@ -10,7 +10,7 @@ use std::{
     ops::Deref,
     time::{Duration, Instant},
 };
-use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features, TextureUsages};
+use wgpu::{include_wgsl, BufferUsages, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -24,6 +24,7 @@ pub struct RenderState {
     queue: wgpu::Queue,
 
     camera_layout: wgpu::BindGroupLayout,
+    texture_layout: wgpu::BindGroupLayout,
     chunk_mesh_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
 
@@ -186,7 +187,7 @@ fn main() {
                 count: None,
             }],
         });
-        let chunk_mesh_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -207,9 +208,10 @@ fn main() {
                 },
             ],
         });
+        let chunk_mesh_layout = ChunkMesh::layout(&device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&camera_layout, &chunk_mesh_layout],
+            bind_group_layouts: &[&camera_layout, &texture_layout, &chunk_mesh_layout],
             push_constant_ranges: &[],
         });
 
@@ -228,6 +230,7 @@ fn main() {
             device,
             queue,
             camera_layout,
+            texture_layout,
             chunk_mesh_layout,
             pipeline_layout,
             surface,
@@ -295,11 +298,17 @@ fn main() {
         near: 0.1,
         far: 100.0,
     };
-    let mut transform = Matrix4::from_translation(Vector3::new(0.0, 0.0, 18.0));
+    let mut transform = Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.0));
     camera.update_transform(&state.queue, transform);
 
     let mut input = PlayerInput::default();
     let mut tracking = false;
+
+    let mut chunk_mesh = ChunkMesh::new(&state.device, &state.chunk_mesh_layout);
+    chunk_mesh.update_transform(
+        &state.queue,
+        Matrix4::from_translation(Vector3::new(-8.0, -8.0, -8.0)),
+    );
 
     let mut chunk = [[[false; 16]; 16]; 16];
     for x in 0..16 {
@@ -310,9 +319,6 @@ fn main() {
             }
         }
     }
-
-    let mut vertex = Vec::<Vertex>::new();
-    let mut index = Vec::<u32>::new();
 
     {
         let mut mesh = [[[Default::default(); 16]; 16]; 16];
@@ -332,29 +338,8 @@ fn main() {
             }
         }
 
-        chunk_mesh(&mesh).for_each(|q| {
-            let i = vertex.len() as u32;
-            vertex.extend_from_slice(&q);
-            index.extend_from_slice(&[i, i + 1, i + 2, i + 2, i + 1, i + 3]);
-        });
+        chunk_mesh.update_mesh(&state.device, &mesh);
     }
-
-    let vertex = state
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            usage: wgpu::BufferUsages::VERTEX,
-            contents: bytemuck::cast_slice(&vertex),
-        });
-
-    let index_len = index.len();
-    let index = state
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            usage: wgpu::BufferUsages::INDEX,
-            contents: bytemuck::cast_slice(&index),
-        });
 
     let stone = include_bytes!("stone.png");
     let stone = image::load_from_memory(stone).unwrap().into_rgba8();
@@ -410,9 +395,9 @@ fn main() {
         ..Default::default()
     });
 
-    let chunk_mesh_bind_group = state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let texture_bind_group = state.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
-        layout: &state.chunk_mesh_layout,
+        layout: &state.texture_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -540,10 +525,8 @@ fn main() {
                     });
                     rpass.set_pipeline(&pipeline);
                     rpass.set_bind_group(0, &camera, &[]);
-                    rpass.set_bind_group(1, &chunk_mesh_bind_group, &[]);
-                    rpass.set_vertex_buffer(0, vertex.slice(..));
-                    rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                    rpass.draw_indexed(0..index_len as u32, 0, 0..1);
+                    rpass.set_bind_group(1, &texture_bind_group, &[]);
+                    chunk_mesh.draw(&mut rpass, 2);
                 }
                 state.queue.submit(Some(encoder.finish()));
                 frame.present();
