@@ -22,6 +22,7 @@ pub struct RenderState {
     queue: wgpu::Queue,
 
     camera_layout: wgpu::BindGroupLayout,
+    chunk_mesh_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
 
     surface: wgpu::Surface,
@@ -208,9 +209,30 @@ fn main() {
                 count: None,
             }],
         });
+        let chunk_mesh_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&camera_layout],
+            bind_group_layouts: &[&camera_layout, &chunk_mesh_layout],
             push_constant_ranges: &[],
         });
 
@@ -229,6 +251,7 @@ fn main() {
             device,
             queue,
             camera_layout,
+            chunk_mesh_layout,
             pipeline_layout,
             surface,
             window,
@@ -356,6 +379,75 @@ fn main() {
             contents: bytemuck::cast_slice(&index),
         });
 
+    let stone = include_bytes!("stone.png");
+    let stone = image::load_from_memory(stone).unwrap().into_rgba8();
+
+    let extent = stone.dimensions();
+    let extent = wgpu::Extent3d {
+        width: extent.0,
+        height: extent.1,
+        depth_or_array_layers: 1,
+    };
+    let texture = state.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    state.queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &stone,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * extent.width),
+            rows_per_image: Some(extent.height),
+        },
+        wgpu::Extent3d {
+            depth_or_array_layers: 1,
+            ..extent
+        },
+    );
+
+    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: None,
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let texture_sampler = state.device.create_sampler(&wgpu::SamplerDescriptor {
+        label: None,
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    let chunk_mesh_bind_group = state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &state.chunk_mesh_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&texture_sampler),
+            },
+        ],
+    });
+
     let mut time = Instant::now();
     let step = Duration::from_nanos(16_666_666);
 
@@ -471,6 +563,7 @@ fn main() {
                     });
                     rpass.set_pipeline(&pipeline);
                     rpass.set_bind_group(0, &camera, &[]);
+                    rpass.set_bind_group(1, &chunk_mesh_bind_group, &[]);
                     rpass.set_vertex_buffer(0, vertex.slice(..));
                     rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
                     rpass.draw_indexed(0..index_len as u32, 0, 0..1);

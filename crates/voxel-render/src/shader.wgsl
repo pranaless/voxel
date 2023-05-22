@@ -13,6 +13,12 @@ struct Camera {
 @group(0) @binding(0)
 var<uniform> camera: Camera;
 
+@group(1) @binding(0)
+var t_tex: texture_2d_array<f32>;
+
+@group(1) @binding(1)
+var s_tex: sampler;
+
 @vertex
 fn vs_main(
     @location(0) pos: vec3<f32>,
@@ -28,5 +34,5 @@ fn vs_main(
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    return vec4<f32>(fract(uv), 0.0, 1.0);
+    return textureSample(t_tex, s_tex, uv, 0);
 }
