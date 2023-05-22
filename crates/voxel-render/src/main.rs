@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use cgmath::{
     Deg, InnerSpace, Matrix, Matrix3, Matrix4, PerspectiveFov, SquareMatrix, Vector2, Vector3, Zero,
 };
-use chunk::{ChunkMesh, Face, Sided};
+use chunk::{chunk_mesh, Face, Sided};
 use parking_lot::Mutex;
 use std::{
     ops::Deref,
@@ -295,7 +295,7 @@ fn main() {
         near: 0.1,
         far: 100.0,
     };
-    let mut transform = Matrix4::from_translation(Vector3::new(0.0, 0.0, 5.0));
+    let mut transform = Matrix4::from_translation(Vector3::new(0.0, 0.0, 18.0));
     camera.update_transform(&state.queue, transform);
 
     let mut input = PlayerInput::default();
@@ -332,8 +332,7 @@ fn main() {
             }
         }
 
-        let mesh = ChunkMesh::new(&mesh);
-        mesh.quads().for_each(|(q, _f)| {
+        chunk_mesh(&mesh).for_each(|q| {
             let i = vertex.len() as u32;
             vertex.extend_from_slice(&q);
             index.extend_from_slice(&[i, i + 1, i + 2, i + 2, i + 1, i + 3]);
