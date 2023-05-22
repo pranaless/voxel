@@ -1,8 +1,10 @@
-use bytemuck::{Pod, Zeroable};
 use cgmath::{
     Deg, InnerSpace, Matrix, Matrix3, Matrix4, PerspectiveFov, SquareMatrix, Vector2, Vector3, Zero,
 };
-use chunk::{chunk_mesh, Face, Sided};
+use chunk::{
+    render::{chunk_mesh, Face, Vertex},
+    Sided,
+};
 use parking_lot::Mutex;
 use std::{
     ops::Deref,
@@ -37,31 +39,6 @@ impl RenderState {
         config.height = height;
         self.surface.configure(&self.device, &config);
     }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Zeroable, Pod)]
-pub struct Vertex {
-    pub pos: [f32; 3],
-    pub uv: [f32; 2],
-}
-impl Vertex {
-    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: 20,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 12,
-                shader_location: 1,
-            },
-        ],
-    };
 }
 
 pub struct Camera {
