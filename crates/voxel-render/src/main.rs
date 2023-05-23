@@ -43,6 +43,7 @@ impl RenderState {
 pub struct Camera {
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    pub transform: Matrix4<f64>,
 }
 impl Camera {
     pub fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -76,7 +77,11 @@ impl Camera {
                 resource: buffer.as_entire_binding(),
             }],
         });
-        Camera { buffer, bind_group }
+        Camera {
+            buffer,
+            bind_group,
+            transform: Matrix4::one(),
+        }
     }
 
     pub fn update_viewport(&self, queue: &wgpu::Queue, viewport: Matrix4<f64>) {
@@ -94,8 +99,13 @@ impl Camera {
         queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(viewport));
     }
 
-    pub fn update_transform(&self, queue: &wgpu::Queue, transform: Matrix4<f64>) {
-        let transform = transform.invert().unwrap();
+    #[inline]
+    pub fn apply_transform(&mut self, delta: Matrix4<f64>) {
+        self.transform = self.transform * delta;
+    }
+
+    pub fn commit_transform(&self, queue: &wgpu::Queue) {
+        let transform = self.transform.invert().unwrap();
         let transform: Matrix4<f32> = transform.cast().unwrap();
         let transform: &[f32; 16] = transform.as_ref();
         queue.write_buffer(&self.buffer, 64, bytemuck::cast_slice(transform));
@@ -300,7 +310,7 @@ fn main() {
     });
     let mut depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let camera = Camera::new(&state.device, &state.camera_layout);
+    let mut camera = Camera::new(&state.device, &state.camera_layout);
 
     let mut viewport = PerspectiveFov {
         fovy: Deg(45.0).into(),
@@ -308,8 +318,7 @@ fn main() {
         near: 0.1,
         far: 100.0,
     };
-    let mut transform = Matrix4::one();
-    camera.update_transform(&state.queue, transform);
+    camera.commit_transform(&state.queue);
 
     let mut input = PlayerInput::default();
     let mut tracking = false;
@@ -441,9 +450,9 @@ fn main() {
 
                 if let Some(delta) = input.delta() {
                     let delta = delta.normalize() * delta_time * STEP / 16.0 * 5.0;
-                    transform = transform * translation(delta);
+                    camera.apply_transform(translation(delta));
                 }
-                camera.update_transform(&state.queue, transform);
+                camera.commit_transform(&state.queue);
 
                 state.window.request_redraw();
             }
@@ -498,14 +507,14 @@ fn main() {
                 ..
             } if tracking => {
                 let delta = 0.01 * Vector2::new(delta.0, -delta.1);
-                transform = transform * {
+                camera.apply_transform({
                     let r = delta.magnitude2();
                     let delta = (delta - delta * r / 6.0).extend(1.0 - r).normalize();
 
                     let s = Vector3::unit_y().cross(delta).normalize();
                     let u = delta.cross(s);
                     Matrix4::from(Matrix3::from_cols(s, u, delta).transpose())
-                };
+                });
             }
             Event::RedrawRequested(_) => {
                 let frame = state.surface.get_current_texture().unwrap();
