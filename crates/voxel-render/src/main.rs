@@ -1,15 +1,13 @@
 use cgmath::{
-    Deg, InnerSpace, Matrix, Matrix3, Matrix4, PerspectiveFov, SquareMatrix, Vector2, Vector3, Zero,
+    Deg, InnerSpace, Matrix, Matrix3, Matrix4, One, PerspectiveFov, SquareMatrix, Vector2, Vector3,
+    Vector4, Zero,
 };
 use chunk::{
     render::{ChunkMesh, Face, Vertex},
     Sided,
 };
 use parking_lot::Mutex;
-use std::{
-    ops::Deref,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use wgpu::{include_wgsl, BufferUsages, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
@@ -47,16 +45,32 @@ pub struct Camera {
     bind_group: wgpu::BindGroup,
 }
 impl Camera {
-    pub fn new(state: &RenderState) -> Self {
-        let buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+    pub fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        })
+    }
+
+    pub fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 128,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
-            layout: &state.camera_layout,
+            layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: buffer.as_entire_binding(),
@@ -86,12 +100,9 @@ impl Camera {
         let transform: &[f32; 16] = transform.as_ref();
         queue.write_buffer(&self.buffer, 64, bytemuck::cast_slice(transform));
     }
-}
-impl Deref for Camera {
-    type Target = wgpu::BindGroup;
 
-    fn deref(&self) -> &Self::Target {
-        &self.bind_group
+    pub fn set_bind_group<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>, index: u32) {
+        rpass.set_bind_group(index, &self.bind_group, &[]);
     }
 }
 
@@ -145,6 +156,17 @@ impl PlayerInput {
     }
 }
 
+pub fn translation(v: Vector3<f64>) -> Matrix4<f64> {
+    let w = (1.0 + v.magnitude2()).sqrt();
+    let c = (v / (w + 1.0)).extend(1.0);
+    Matrix4::from_cols(
+        c * v.x + Vector4::unit_x(),
+        c * v.y + Vector4::unit_y(),
+        c * v.z + Vector4::unit_z(),
+        v.extend(w),
+    )
+}
+
 fn main() {
     env_logger::init();
 
@@ -174,19 +196,7 @@ fn main() {
             .await
             .unwrap();
 
-        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let camera_layout = Camera::layout(&device);
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
@@ -290,7 +300,7 @@ fn main() {
     });
     let mut depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let camera = Camera::new(&state);
+    let camera = Camera::new(&state.device, &state.camera_layout);
 
     let mut viewport = PerspectiveFov {
         fovy: Deg(45.0).into(),
@@ -298,17 +308,17 @@ fn main() {
         near: 0.1,
         far: 100.0,
     };
-    let mut transform = Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.0));
+    let mut transform = Matrix4::one();
     camera.update_transform(&state.queue, transform);
 
     let mut input = PlayerInput::default();
     let mut tracking = false;
 
+    const SIDE: f32 = 0.485_868_28;
+    const STEP: f64 = 1.272_019_649_514_069;
+
     let mut chunk_mesh = ChunkMesh::new(&state.device, &state.chunk_mesh_layout);
-    chunk_mesh.update_transform(
-        &state.queue,
-        Matrix4::from_translation(Vector3::new(-8.0, -8.0, -8.0)),
-    );
+    chunk_mesh.update_transform(&state.queue, Matrix4::one());
 
     let mut chunk = [[[false; 16]; 16]; 16];
     for x in 0..16 {
@@ -338,7 +348,7 @@ fn main() {
             }
         }
 
-        chunk_mesh.update_mesh(&state.device, &mesh);
+        chunk_mesh.update_mesh(&state.device, SIDE, &mesh);
     }
 
     let stone = include_bytes!("stone.png");
@@ -430,8 +440,8 @@ fn main() {
                 };
 
                 if let Some(delta) = input.delta() {
-                    let delta = delta.normalize() * delta_time * 1.5;
-                    transform = transform * Matrix4::from_translation(delta);
+                    let delta = delta.normalize() * delta_time * STEP / 16.0 * 5.0;
+                    transform = transform * translation(delta);
                 }
                 camera.update_transform(&state.queue, transform);
 
@@ -524,7 +534,7 @@ fn main() {
                         }),
                     });
                     rpass.set_pipeline(&pipeline);
-                    rpass.set_bind_group(0, &camera, &[]);
+                    camera.set_bind_group(&mut rpass, 0);
                     rpass.set_bind_group(1, &texture_bind_group, &[]);
                     chunk_mesh.draw(&mut rpass, 2);
                 }

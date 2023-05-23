@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use cgmath::Matrix4;
+use cgmath::{InnerSpace, Matrix4, Vector3, Vector4};
 use itertools::Itertools;
 use std::{fmt, vec::IntoIter};
 use wgpu::{util::DeviceExt, BufferUsages};
@@ -9,22 +9,22 @@ use super::Sided;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Zeroable, Pod)]
 pub struct Vertex {
-    pub pos: [f32; 3],
+    pub pos: [f32; 4],
     pub uv: [f32; 2],
 }
 impl Vertex {
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: 20,
+        array_stride: 24,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
             wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
+                format: wgpu::VertexFormat::Float32x4,
                 offset: 0,
                 shader_location: 0,
             },
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x2,
-                offset: 12,
+                offset: 16,
                 shader_location: 1,
             },
         ],
@@ -100,6 +100,7 @@ impl Quad {
     }
 }
 
+// TODO: Write tests
 fn chunk_pane(faces: impl Iterator<Item = Face>) -> IntoIter<Quad> {
     faces
         .enumerate()
@@ -113,6 +114,11 @@ fn chunk_pane(faces: impl Iterator<Item = Face>) -> IntoIter<Quad> {
         .sorted_unstable_by_key(|v| v.row.start() << 4 | v.col.start())
         .coalesce(|o, t| o.merge_col(t))
         .sorted_unstable_by_key(|v| v.col.start() << 4 | v.row.start())
+}
+
+fn from_klein(v: Vector3<f32>) -> Vector4<f32> {
+    let w = 1.0 / (1.0 - v.magnitude2()).sqrt();
+    (v * w).extend(w)
 }
 
 pub struct ChunkMesh {
@@ -183,7 +189,12 @@ impl ChunkMesh {
         queue.write_buffer(&self.state, 0, bytemuck::cast_slice(transform));
     }
 
-    pub fn update_mesh(&mut self, device: &wgpu::Device, faces: &[[[Sided<Face>; 16]; 16]; 16]) {
+    pub fn update_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        chunk_side: f32,
+        faces: &[[[Sided<Face>; 16]; 16]; 16],
+    ) {
         fn orient(idx: u8, j: usize, k: usize) -> [usize; 3] {
             let ori = idx >> 5;
             let i = (idx & 0b1111) as usize;
@@ -195,10 +206,10 @@ impl ChunkMesh {
             }
         }
 
-        fn build_quad(idx: u8, quad: Quad) -> [Vertex; 4] {
+        fn build_quad(idx: u8, chunk_side: f32, quad: Quad) -> [Vertex; 4] {
             let (j, h) = (quad.col.start(), quad.col.extent() + 1);
             let (k, w) = (quad.row.start(), quad.row.extent() + 1);
-            let [x, y, z] = orient(idx, j, k).map(|v| v as f32);
+            let v = Vector3::from(orient(idx, j, k).map(|v| v as f32 - 8.0));
             let (w, h) = (w as f32, h as f32);
 
             let o = match idx >> 4 {
@@ -210,21 +221,22 @@ impl ChunkMesh {
                 5 => [[0.0, 0.0, 1.0], [w, 0.0, 1.0], [0.0, h, 1.0], [w, h, 1.0]],
                 _ => unreachable!(),
             };
+            let o = o.map(|o| from_klein((v + Vector3::from(o)) * chunk_side / 8.0));
             [
                 Vertex {
-                    pos: [x + o[0][0], y + o[0][1], z + o[0][2]],
+                    pos: *o[0].as_ref(),
                     uv: [0.0, 0.0],
                 },
                 Vertex {
-                    pos: [x + o[1][0], y + o[1][1], z + o[1][2]],
+                    pos: *o[1].as_ref(),
                     uv: [w, 0.0],
                 },
                 Vertex {
-                    pos: [x + o[2][0], y + o[2][1], z + o[2][2]],
+                    pos: *o[2].as_ref(),
                     uv: [0.0, h],
                 },
                 Vertex {
-                    pos: [x + o[3][0], y + o[3][1], z + o[3][2]],
+                    pos: *o[3].as_ref(),
                     uv: [w, h],
                 },
             ]
@@ -251,7 +263,7 @@ impl ChunkMesh {
             vertex.reserve(4 * pane.len());
             index.reserve(6 * pane.len());
             pane.into_iter()
-                .map(move |q| build_quad(idx, q))
+                .map(move |q| build_quad(idx, chunk_side, q))
                 .for_each(|q| {
                     let i = vertex.len() as u32;
                     vertex.extend_from_slice(&q);

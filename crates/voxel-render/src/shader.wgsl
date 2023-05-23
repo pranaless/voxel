@@ -28,14 +28,14 @@ var<uniform> mesh: ChunkMesh;
 
 @vertex
 fn vs_main(
-    @location(0) pos: vec3<f32>,
+    @location(0) pos: vec4<f32>,
     @location(1) uv: vec2<f32>,
 ) -> VertexOutput {
     var output: VertexOutput;
     output.pos = camera.viewport
                * camera.transform
                * mesh.transform
-               * vec4<f32>(pos, 1.0);
+               * pos;
     output.uv = uv;
     return output;
 }
