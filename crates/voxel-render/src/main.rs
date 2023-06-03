@@ -326,20 +326,16 @@ fn main() {
     const SIDE: f32 = 0.485_868_28;
     const STEP: f64 = 1.272_019_649_514_069;
 
-    let mut chunk_mesh = ChunkMesh::new(&state.device, &state.chunk_mesh_layout);
-    chunk_mesh.update_transform(&state.queue, Matrix4::one());
-
-    let mut chunk = [[[false; 16]; 16]; 16];
-    for x in 0..16 {
-        for z in 0..16 {
-            let ym = ((x as f64 / 4.0).sin() * (z as f64 / 4.0).cos() * 6.0 + 8.0) as usize;
-            for y in 0..ym {
-                chunk[x][y][z] = true;
+    let mesh = {
+        let mut chunk = [[[false; 16]; 16]; 16];
+        for x in 0..16 {
+            for z in 0..16 {
+                let ym = ((x as f64 / 4.0).sin() * (z as f64 / 4.0).cos() * 6.0 + 8.0) as usize;
+                for y in 0..ym {
+                    chunk[x][y][z] = true;
+                }
             }
         }
-    }
-
-    {
         let mut mesh = [[[Default::default(); 16]; 16]; 16];
         for x in 0..16 {
             for y in 0..16 {
@@ -356,9 +352,41 @@ fn main() {
                 }
             }
         }
+        mesh
+    };
 
-        chunk_mesh.update_mesh(&state.device, SIDE, &mesh);
-    }
+    let mut chunks = Vec::new();
+
+    let mut insert = |tr: Matrix4<f64>| -> Matrix4<f64> {
+        let mut chunk = ChunkMesh::new(&state.device, &state.chunk_mesh_layout);
+        chunk.update_transform(&state.queue, tr);
+        chunk.update_mesh(&state.device, SIDE, &mesh);
+        chunks.push(chunk);
+        tr
+    };
+
+    let trs = Sided {
+        neg_x: translation(Vector3::new(-STEP, 0.0, 0.0)),
+        pos_x: translation(Vector3::new(STEP, 0.0, 0.0)),
+        neg_y: translation(Vector3::new(0.0, -STEP, 0.0)),
+        pos_y: translation(Vector3::new(0.0, STEP, 0.0)),
+        neg_z: translation(Vector3::new(0.0, 0.0, -STEP)),
+        pos_z: translation(Vector3::new(0.0, 0.0, STEP)),
+    };
+
+    let c0 = insert(Matrix4::one());
+    let c1 = insert(c0 * trs.pos_x);
+    let c2 = insert(c0 * trs.pos_z);
+    let c3 = insert(c0 * trs.neg_x);
+    let c4 = insert(c0 * trs.neg_z);
+    let _c5 = insert(c1 * trs.pos_z);
+    let _c6 = insert(c1 * trs.neg_z);
+    let _c7 = insert(c2 * trs.pos_x);
+    let _c8 = insert(c2 * trs.neg_x);
+    let _c9 = insert(c3 * trs.neg_z);
+    let _c10 = insert(c3 * trs.pos_z);
+    let _c11 = insert(c4 * trs.neg_x);
+    let _c12 = insert(c4 * trs.pos_x);
 
     let stone = include_bytes!("stone.png");
     let stone = image::load_from_memory(stone).unwrap().into_rgba8();
@@ -545,7 +573,9 @@ fn main() {
                     rpass.set_pipeline(&pipeline);
                     camera.set_bind_group(&mut rpass, 0);
                     rpass.set_bind_group(1, &texture_bind_group, &[]);
-                    chunk_mesh.draw(&mut rpass, 2);
+                    for ch in chunks.iter() {
+                        ch.draw(&mut rpass, 2);
+                    }
                 }
                 state.queue.submit(Some(encoder.finish()));
                 frame.present();
