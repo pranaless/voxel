@@ -1,3 +1,4 @@
+use bytemuck::{Pod, Zeroable};
 use cgmath::{
     Deg, InnerSpace, Matrix, Matrix3, Matrix4, One, PerspectiveFov, SquareMatrix, Vector2, Vector3,
     Vector4, Zero,
@@ -8,7 +9,7 @@ use chunk::{
 };
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
-use wgpu::{include_wgsl, BufferUsages, Features, TextureUsages};
+use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -40,9 +41,44 @@ impl RenderState {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod)]
+struct CameraUniform {
+    viewport: [f32; 16],
+    transform: [f32; 16],
+}
+impl CameraUniform {
+    pub fn new(viewport: PerspectiveFov<f64>, transform: Matrix4<f64>) -> Self {
+        let viewport = {
+            #[rustfmt::skip]
+            const OPENGL_TO_WGPU_MATRIX: Matrix4<f64> = Matrix4::new(
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.5, 0.0,
+                0.0, 0.0, 0.5, 1.0,
+            );
+
+            let viewport: Matrix4<f64> = viewport.into();
+            let viewport = OPENGL_TO_WGPU_MATRIX * viewport;
+            let viewport: Matrix4<f32> = viewport.cast().unwrap();
+            *viewport.as_ref()
+        };
+        let transform = {
+            let transform = transform.invert().unwrap();
+            let transform: Matrix4<f32> = transform.cast().unwrap();
+            *transform.as_ref()
+        };
+        Self {
+            viewport,
+            transform,
+        }
+    }
+}
+
 pub struct Camera {
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    pub viewport: PerspectiveFov<f64>,
     pub transform: Matrix4<f64>,
 }
 impl Camera {
@@ -62,12 +98,16 @@ impl Camera {
         })
     }
 
-    pub fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    pub fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        viewport: PerspectiveFov<f64>,
+    ) -> Self {
+        let transform = Matrix4::one();
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            size: 128,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+            contents: bytemuck::bytes_of(&CameraUniform::new(viewport, transform)),
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -80,23 +120,9 @@ impl Camera {
         Camera {
             buffer,
             bind_group,
-            transform: Matrix4::one(),
+            viewport,
+            transform,
         }
-    }
-
-    pub fn update_viewport(&self, queue: &wgpu::Queue, viewport: Matrix4<f64>) {
-        #[rustfmt::skip]
-        const OPENGL_TO_WGPU_MATRIX: Matrix4<f64> = Matrix4::new(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 0.5, 0.0,
-            0.0, 0.0, 0.5, 1.0,
-        );
-
-        let viewport = OPENGL_TO_WGPU_MATRIX * viewport;
-        let viewport: Matrix4<f32> = viewport.cast().unwrap();
-        let viewport: &[f32; 16] = viewport.as_ref();
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(viewport));
     }
 
     #[inline]
@@ -104,11 +130,12 @@ impl Camera {
         self.transform = self.transform * delta;
     }
 
-    pub fn commit_transform(&self, queue: &wgpu::Queue) {
-        let transform = self.transform.invert().unwrap();
-        let transform: Matrix4<f32> = transform.cast().unwrap();
-        let transform: &[f32; 16] = transform.as_ref();
-        queue.write_buffer(&self.buffer, 64, bytemuck::cast_slice(transform));
+    pub fn commit(&self, queue: &wgpu::Queue) {
+        queue.write_buffer(
+            &self.buffer,
+            0,
+            bytemuck::bytes_of(&CameraUniform::new(self.viewport, self.transform)),
+        );
     }
 
     pub fn set_bind_group<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>, index: u32) {
@@ -310,15 +337,16 @@ fn main() {
     });
     let mut depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut camera = Camera::new(&state.device, &state.camera_layout);
-
-    let mut viewport = PerspectiveFov {
-        fovy: Deg(45.0).into(),
-        aspect: 1.0,
-        near: 0.1,
-        far: 100.0,
-    };
-    camera.commit_transform(&state.queue);
+    let mut camera = Camera::new(
+        &state.device,
+        &state.camera_layout,
+        PerspectiveFov {
+            fovy: Deg(45.0).into(),
+            aspect: 1.0,
+            near: 0.1,
+            far: 100.0,
+        },
+    );
 
     let mut input = PlayerInput::default();
     let mut tracking = false;
@@ -480,7 +508,7 @@ fn main() {
                     let delta = delta.normalize() * delta_time * STEP / 16.0 * 5.0;
                     camera.apply_transform(translation(delta));
                 }
-                camera.commit_transform(&state.queue);
+                camera.commit(&state.queue);
 
                 state.window.request_redraw();
             }
@@ -505,8 +533,8 @@ fn main() {
                 });
                 depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-                viewport.aspect = size.width as f64 / size.height as f64;
-                camera.update_viewport(&state.queue, viewport.into());
+                camera.viewport.aspect = size.width as f64 / size.height as f64;
+                camera.commit(&state.queue);
             }
             Event::WindowEvent {
                 event:
