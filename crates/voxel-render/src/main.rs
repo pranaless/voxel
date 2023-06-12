@@ -1,14 +1,12 @@
 use bytemuck::{Pod, Zeroable};
 use cgmath::{
     Deg, InnerSpace, Matrix, Matrix3, Matrix4, One, PerspectiveFov, SquareMatrix, Vector2, Vector3,
-    Vector4, Zero,
+    Zero,
 };
-use chunk::{
-    render::{ChunkMesh, Face, Vertex},
-    Sided,
-};
+use chunk::render::{ChunkMesh, ChunkMeshBuilder, Face, Vertex};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
+use voxel_space::{translation, Sided};
 use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
@@ -24,7 +22,6 @@ pub struct RenderState {
 
     camera_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
-    chunk_mesh_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
 
     surface: wgpu::Surface,
@@ -193,15 +190,38 @@ impl PlayerInput {
     }
 }
 
-pub fn translation(v: Vector3<f64>) -> Matrix4<f64> {
-    let w = (1.0 + v.magnitude2()).sqrt();
-    let c = (v / (w + 1.0)).extend(1.0);
-    Matrix4::from_cols(
-        c * v.x + Vector4::unit_x(),
-        c * v.y + Vector4::unit_y(),
-        c * v.z + Vector4::unit_z(),
-        v.extend(w),
-    )
+#[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod)]
+pub struct ChunkData {
+    pub transform: [f32; 16],
+}
+impl ChunkData {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: 64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 3,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 5,
+            },
+        ],
+    };
 }
 
 fn main() {
@@ -255,10 +275,9 @@ fn main() {
                 },
             ],
         });
-        let chunk_mesh_layout = ChunkMesh::layout(&device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&camera_layout, &texture_layout, &chunk_mesh_layout],
+            bind_group_layouts: &[&camera_layout, &texture_layout],
             push_constant_ranges: &[],
         });
 
@@ -278,7 +297,6 @@ fn main() {
             queue,
             camera_layout,
             texture_layout,
-            chunk_mesh_layout,
             pipeline_layout,
             surface,
             window,
@@ -299,7 +317,7 @@ fn main() {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::LAYOUT],
+                buffers: &[Vertex::LAYOUT, ChunkData::LAYOUT],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -354,22 +372,23 @@ fn main() {
     const SIDE: f32 = 0.485_868_28;
     const STEP: f64 = 1.272_019_649_514_069;
 
-    let mesh = {
+    let faces = {
         let mut chunk = [[[false; 16]; 16]; 16];
-        for x in 0..16 {
-            for z in 0..16 {
-                let ym = ((x as f64 / 4.0).sin() * (z as f64 / 4.0).cos() * 6.0 + 8.0) as usize;
-                for y in 0..ym {
-                    chunk[x][y][z] = true;
+        for i in 0..16 {
+            for j in 0..2 {
+                for k in 0..2 {
+                    chunk[i][7 + j][7 + k] = true;
+                    chunk[7 + j][i][7 + k] = true;
+                    chunk[7 + j][7 + k][i] = true;
                 }
             }
         }
-        let mut mesh = [[[Default::default(); 16]; 16]; 16];
+        let mut faces = [[[Default::default(); 16]; 16]; 16];
         for x in 0..16 {
             for y in 0..16 {
                 for z in 0..16 {
                     let s = chunk[x][y][z];
-                    mesh[x][y][z] = Sided {
+                    faces[x][y][z] = Sided {
                         neg_x: Face(s && (x == 0 || !chunk[x - 1][y][z])),
                         pos_x: Face(s && (x == 15 || !chunk[x + 1][y][z])),
                         neg_y: Face(s && (y == 0 || !chunk[x][y - 1][z])),
@@ -380,16 +399,37 @@ fn main() {
                 }
             }
         }
-        mesh
+        faces
     };
 
-    let mut chunks = Vec::new();
+    let mut mesh_builder = ChunkMeshBuilder::new(SIDE);
+    mesh_builder.add_chunk(Matrix4::one(), &faces);
+    let (vertex, index) = mesh_builder.data();
 
-    let mut insert = |tr: Matrix4<f64>| -> Matrix4<f64> {
-        let mut chunk = ChunkMesh::new(&state.device, &state.chunk_mesh_layout);
-        chunk.update_transform(&state.queue, tr);
-        chunk.update_mesh(&state.device, SIDE, &mesh);
-        chunks.push(chunk);
+    let vertex = state
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            usage: wgpu::BufferUsages::VERTEX,
+            contents: bytemuck::cast_slice(&vertex),
+        });
+    let index_len = index.len();
+    let index = state
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            usage: wgpu::BufferUsages::INDEX,
+            contents: bytemuck::cast_slice(&index),
+        });
+
+    let mut chunks = Vec::new();
+    let mut chunk_data = Vec::new();
+
+    let mut insert = |tr: Matrix4<f64>, st: u16| -> Matrix4<f64> {
+        chunks.push((tr.w, st));
+        chunk_data.push(ChunkData {
+            transform: *tr.cast::<f32>().unwrap().as_ref(),
+        });
         tr
     };
 
@@ -402,19 +442,18 @@ fn main() {
         pos_z: translation(Vector3::new(0.0, 0.0, STEP)),
     };
 
-    let c0 = insert(Matrix4::one());
-    let c1 = insert(c0 * trs.pos_x);
-    let c2 = insert(c0 * trs.pos_z);
-    let c3 = insert(c0 * trs.neg_x);
-    let c4 = insert(c0 * trs.neg_z);
-    let _c5 = insert(c1 * trs.pos_z);
-    let _c6 = insert(c1 * trs.neg_z);
-    let _c7 = insert(c2 * trs.pos_x);
-    let _c8 = insert(c2 * trs.neg_x);
-    let _c9 = insert(c3 * trs.neg_z);
-    let _c10 = insert(c3 * trs.pos_z);
-    let _c11 = insert(c4 * trs.neg_x);
-    let _c12 = insert(c4 * trs.pos_x);
+    insert(Matrix4::one(), 0o100000);
+    voxel_space::generate_origin(&Matrix4::one(), 6, |tr, sd, st| insert(tr * trs[sd], st));
+
+    println!("{}", chunks.len());
+
+    let chunk_data = state
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            usage: wgpu::BufferUsages::VERTEX,
+            contents: bytemuck::cast_slice(&chunk_data),
+        });
 
     let stone = include_bytes!("stone.png");
     let stone = image::load_from_memory(stone).unwrap().into_rgba8();
@@ -488,6 +527,8 @@ fn main() {
     let mut time = Instant::now();
     let step = Duration::from_nanos(16_666_666);
 
+    let mut cc = 0;
+
     event_loop.run(move |event, _, ctrl| {
         let _ = (&depth,);
 
@@ -509,6 +550,15 @@ fn main() {
                     camera.apply_transform(translation(delta));
                 }
                 camera.commit(&state.queue);
+
+                let cti = camera.transform.invert().unwrap();
+                for (i, (chunk, st)) in chunks.iter().enumerate() {
+                    let p = cti * chunk;
+                    if (p.w * p.w - 1.0).sqrt() as f32 <= SIDE && cc != i {
+                        println!("{:05o} => {st:05o}", chunks[cc].1);
+                        cc = i;
+                    }
+                }
 
                 state.window.request_redraw();
             }
@@ -601,9 +651,10 @@ fn main() {
                     rpass.set_pipeline(&pipeline);
                     camera.set_bind_group(&mut rpass, 0);
                     rpass.set_bind_group(1, &texture_bind_group, &[]);
-                    for ch in chunks.iter() {
-                        ch.draw(&mut rpass, 2);
-                    }
+                    rpass.set_vertex_buffer(0, vertex.slice(..));
+                    rpass.set_vertex_buffer(1, chunk_data.slice(..));
+                    rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                    rpass.draw_indexed(0..index_len as _, 0, 0..chunks.len() as _);
                 }
                 state.queue.submit(Some(encoder.finish()));
                 frame.present();

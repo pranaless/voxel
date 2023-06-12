@@ -14,3 +14,4 @@ parking_lot = "0.12.1"
 pollster = "0.3.0"
 wgpu = "0.16.0"
 winit = "0.28.6"
+voxel-space = { path = "../voxel-space" }

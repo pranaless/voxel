@@ -1663,8 +1663,16 @@ dependencies = [
  "log",
  "parking_lot",
  "pollster",
+ "voxel-space",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "voxel-space"
+version = "0.1.0"
+dependencies = [
+ "cgmath",
 ]
 
 [[package]]

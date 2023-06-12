@@ -2,9 +2,8 @@ use bytemuck::{Pod, Zeroable};
 use cgmath::{InnerSpace, Matrix4, Vector3, Vector4};
 use itertools::Itertools;
 use std::{fmt, vec::IntoIter};
+use voxel_space::Sided;
 use wgpu::{util::DeviceExt, BufferUsages};
-
-use super::Sided;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Zeroable, Pod)]
@@ -121,6 +120,101 @@ fn from_klein(v: Vector3<f32>) -> Vector4<f32> {
     (v * w).extend(w)
 }
 
+pub struct ChunkMeshBuilder {
+    chunk_side: f32,
+    vertex: Vec<Vertex>,
+    index: Vec<u32>,
+}
+impl ChunkMeshBuilder {
+    pub fn new(chunk_side: f32) -> Self {
+        ChunkMeshBuilder {
+            chunk_side,
+            vertex: Vec::new(),
+            index: Vec::new(),
+        }
+    }
+
+    fn orient(idx: u8, j: usize, k: usize) -> [usize; 3] {
+        let ori = idx >> 5;
+        let i = (idx & 0b1111) as usize;
+        match ori {
+            0 => [i, j, k],
+            1 => [j, i, k],
+            2 => [k, j, i],
+            _ => unreachable!(),
+        }
+    }
+
+    fn build_quad(chunk_side: f32, transform: Matrix4<f32>, idx: u8, quad: Quad) -> [Vertex; 4] {
+        let (j, h) = (quad.col.start(), quad.col.extent() + 1);
+        let (k, w) = (quad.row.start(), quad.row.extent() + 1);
+        let v = Vector3::from(Self::orient(idx, j, k).map(|v| v as f32 - 8.0));
+        let (w, h) = (w as f32, h as f32);
+
+        let o = match idx >> 4 {
+            0 => [[0.0, 0.0, 0.0], [0.0, 0.0, w], [0.0, h, 0.0], [0.0, h, w]],
+            1 => [[1.0, 0.0, w], [1.0, 0.0, 0.0], [1.0, h, w], [1.0, h, 0.0]],
+            2 => [[0.0, 0.0, w], [0.0, 0.0, 0.0], [h, 0.0, w], [h, 0.0, 0.0]],
+            3 => [[0.0, 1.0, 0.0], [0.0, 1.0, w], [h, 1.0, 0.0], [h, 1.0, w]],
+            4 => [[w, 0.0, 0.0], [0.0, 0.0, 0.0], [w, h, 0.0], [0.0, h, 0.0]],
+            5 => [[0.0, 0.0, 1.0], [w, 0.0, 1.0], [0.0, h, 1.0], [w, h, 1.0]],
+            _ => unreachable!(),
+        };
+        let o = o.map(|o| transform * from_klein((v + Vector3::from(o)) * chunk_side / 8.0));
+        [
+            Vertex {
+                pos: *o[0].as_ref(),
+                uv: [0.0, 0.0],
+            },
+            Vertex {
+                pos: *o[1].as_ref(),
+                uv: [w, 0.0],
+            },
+            Vertex {
+                pos: *o[2].as_ref(),
+                uv: [0.0, h],
+            },
+            Vertex {
+                pos: *o[3].as_ref(),
+                uv: [w, h],
+            },
+        ]
+    }
+
+    pub fn add_chunk(&mut self, transform: Matrix4<f32>, faces: &[[[Sided<Face>; 16]; 16]; 16]) {
+        for idx in 0..96 {
+            let faces = (0..16)
+                .cartesian_product(0..16)
+                .map(move |(j, k)| Self::orient(idx, j, k))
+                .map(|[x, y, z]| &faces[x][y][z])
+                .map(move |s| match idx >> 4 {
+                    0 => s.neg_x,
+                    1 => s.pos_x,
+                    2 => s.neg_y,
+                    3 => s.pos_y,
+                    4 => s.neg_z,
+                    5 => s.pos_z,
+                    _ => unreachable!(),
+                });
+            let pane = chunk_pane(faces).collect::<Vec<_>>();
+            self.vertex.reserve(4 * pane.len());
+            self.index.reserve(6 * pane.len());
+            pane.into_iter()
+                .map(|q| Self::build_quad(self.chunk_side, transform, idx, q))
+                .for_each(|q| {
+                    let i = self.vertex.len() as u32;
+                    self.vertex.extend_from_slice(&q);
+                    self.index
+                        .extend_from_slice(&[i, i + 1, i + 2, i + 2, i + 1, i + 3]);
+                });
+        }
+    }
+
+    pub fn data(&self) -> (&[Vertex], &[u32]) {
+        (&self.vertex, &self.index)
+    }
+}
+
 pub struct ChunkMesh {
     bind_group: wgpu::BindGroup,
     state: wgpu::Buffer,
@@ -189,99 +283,18 @@ impl ChunkMesh {
         queue.write_buffer(&self.state, 0, bytemuck::cast_slice(transform));
     }
 
-    pub fn update_mesh(
-        &mut self,
-        device: &wgpu::Device,
-        chunk_side: f32,
-        faces: &[[[Sided<Face>; 16]; 16]; 16],
-    ) {
-        fn orient(idx: u8, j: usize, k: usize) -> [usize; 3] {
-            let ori = idx >> 5;
-            let i = (idx & 0b1111) as usize;
-            match ori {
-                0 => [i, j, k],
-                1 => [j, i, k],
-                2 => [k, j, i],
-                _ => unreachable!(),
-            }
-        }
-
-        fn build_quad(idx: u8, chunk_side: f32, quad: Quad) -> [Vertex; 4] {
-            let (j, h) = (quad.col.start(), quad.col.extent() + 1);
-            let (k, w) = (quad.row.start(), quad.row.extent() + 1);
-            let v = Vector3::from(orient(idx, j, k).map(|v| v as f32 - 8.0));
-            let (w, h) = (w as f32, h as f32);
-
-            let o = match idx >> 4 {
-                0 => [[0.0, 0.0, 0.0], [0.0, 0.0, w], [0.0, h, 0.0], [0.0, h, w]],
-                1 => [[1.0, 0.0, w], [1.0, 0.0, 0.0], [1.0, h, w], [1.0, h, 0.0]],
-                2 => [[0.0, 0.0, w], [0.0, 0.0, 0.0], [h, 0.0, w], [h, 0.0, 0.0]],
-                3 => [[0.0, 1.0, 0.0], [0.0, 1.0, w], [h, 1.0, 0.0], [h, 1.0, w]],
-                4 => [[w, 0.0, 0.0], [0.0, 0.0, 0.0], [w, h, 0.0], [0.0, h, 0.0]],
-                5 => [[0.0, 0.0, 1.0], [w, 0.0, 1.0], [0.0, h, 1.0], [w, h, 1.0]],
-                _ => unreachable!(),
-            };
-            let o = o.map(|o| from_klein((v + Vector3::from(o)) * chunk_side / 8.0));
-            [
-                Vertex {
-                    pos: *o[0].as_ref(),
-                    uv: [0.0, 0.0],
-                },
-                Vertex {
-                    pos: *o[1].as_ref(),
-                    uv: [w, 0.0],
-                },
-                Vertex {
-                    pos: *o[2].as_ref(),
-                    uv: [0.0, h],
-                },
-                Vertex {
-                    pos: *o[3].as_ref(),
-                    uv: [w, h],
-                },
-            ]
-        }
-
-        let mut vertex = Vec::<Vertex>::new();
-        let mut index = Vec::<u32>::new();
-
-        for idx in 0..96 {
-            let faces = (0..16)
-                .cartesian_product(0..16)
-                .map(move |(j, k)| orient(idx, j, k))
-                .map(|[x, y, z]| &faces[x][y][z])
-                .map(move |s| match idx >> 4 {
-                    0 => s.neg_x,
-                    1 => s.pos_x,
-                    2 => s.neg_y,
-                    3 => s.pos_y,
-                    4 => s.neg_z,
-                    5 => s.pos_z,
-                    _ => unreachable!(),
-                });
-            let pane = chunk_pane(faces).collect::<Vec<_>>();
-            vertex.reserve(4 * pane.len());
-            index.reserve(6 * pane.len());
-            pane.into_iter()
-                .map(move |q| build_quad(idx, chunk_side, q))
-                .for_each(|q| {
-                    let i = vertex.len() as u32;
-                    vertex.extend_from_slice(&q);
-                    index.extend_from_slice(&[i, i + 1, i + 2, i + 2, i + 1, i + 3]);
-                });
-        }
-
+    pub fn set_mesh(&mut self, device: &wgpu::Device, builder: &ChunkMeshBuilder) {
         self.vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             usage: wgpu::BufferUsages::VERTEX,
-            contents: bytemuck::cast_slice(&vertex),
+            contents: bytemuck::cast_slice(&builder.vertex),
         });
         self.index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             usage: wgpu::BufferUsages::INDEX,
-            contents: bytemuck::cast_slice(&index),
+            contents: bytemuck::cast_slice(&builder.index),
         });
-        self.length = index.len() as u32;
+        self.length = builder.index.len() as u32;
     }
 
     pub fn draw<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>, bind_group_index: u32) {
