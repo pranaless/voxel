@@ -3,10 +3,10 @@ use cgmath::{
     Deg, InnerSpace, Matrix, Matrix3, Matrix4, One, PerspectiveFov, SquareMatrix, Vector2, Vector3,
     Zero,
 };
-use chunk::render::{ChunkMesh, ChunkMeshBuilder, Face, Vertex};
+use chunk::render::{ChunkMeshBuilder, Face, Vertex};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
-use voxel_space::{translation, Sided};
+use voxel_space::{translation, Sided, Space};
 use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
@@ -411,7 +411,7 @@ fn main() {
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             usage: wgpu::BufferUsages::VERTEX,
-            contents: bytemuck::cast_slice(&vertex),
+            contents: bytemuck::cast_slice(vertex),
         });
     let index_len = index.len();
     let index = state
@@ -419,19 +419,10 @@ fn main() {
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             usage: wgpu::BufferUsages::INDEX,
-            contents: bytemuck::cast_slice(&index),
+            contents: bytemuck::cast_slice(index),
         });
 
-    let mut chunks = Vec::new();
-    let mut chunk_data = Vec::new();
-
-    let mut insert = |tr: Matrix4<f64>, st: u16| -> Matrix4<f64> {
-        chunks.push((tr.w, st));
-        chunk_data.push(ChunkData {
-            transform: *tr.cast::<f32>().unwrap().as_ref(),
-        });
-        tr
-    };
+    let (mut space, origin) = Space::new();
 
     let trs = Sided {
         neg_x: translation(Vector3::new(-STEP, 0.0, 0.0)),
@@ -442,11 +433,21 @@ fn main() {
         pos_z: translation(Vector3::new(0.0, 0.0, STEP)),
     };
 
-    insert(Matrix4::one(), 0o100000);
-    voxel_space::generate_origin(&Matrix4::one(), 6, |tr, sd, st| insert(tr * trs[sd], st));
+    let mut chunk_data = Vec::new();
 
-    println!("{}", chunks.len());
+    space.generate(
+        origin,
+        (Matrix4::one(), 6),
+        |_cell, &(tr, radius)| {
+            chunk_data.push(ChunkData {
+                transform: *tr.cast::<f32>().unwrap().as_ref(),
+            });
+            radius > 0
+        },
+        |side, _cell, (tr, radius)| (tr * trs[side], radius - 1),
+    );
 
+    let chunk_len = chunk_data.len();
     let chunk_data = state
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -454,6 +455,8 @@ fn main() {
             usage: wgpu::BufferUsages::VERTEX,
             contents: bytemuck::cast_slice(&chunk_data),
         });
+
+    println!("{}", chunk_len);
 
     let stone = include_bytes!("stone.png");
     let stone = image::load_from_memory(stone).unwrap().into_rgba8();
@@ -527,8 +530,6 @@ fn main() {
     let mut time = Instant::now();
     let step = Duration::from_nanos(16_666_666);
 
-    let mut cc = 0;
-
     event_loop.run(move |event, _, ctrl| {
         let _ = (&depth,);
 
@@ -550,15 +551,6 @@ fn main() {
                     camera.apply_transform(translation(delta));
                 }
                 camera.commit(&state.queue);
-
-                let cti = camera.transform.invert().unwrap();
-                for (i, (chunk, st)) in chunks.iter().enumerate() {
-                    let p = cti * chunk;
-                    if (p.w * p.w - 1.0).sqrt() as f32 <= SIDE && cc != i {
-                        println!("{:05o} => {st:05o}", chunks[cc].1);
-                        cc = i;
-                    }
-                }
 
                 state.window.request_redraw();
             }
@@ -654,7 +646,7 @@ fn main() {
                     rpass.set_vertex_buffer(0, vertex.slice(..));
                     rpass.set_vertex_buffer(1, chunk_data.slice(..));
                     rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                    rpass.draw_indexed(0..index_len as _, 0, 0..chunks.len() as _);
+                    rpass.draw_indexed(0..index_len as _, 0, 0..chunk_len as _);
                 }
                 state.queue.submit(Some(encoder.finish()));
                 frame.present();

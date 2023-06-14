@@ -1,4 +1,5 @@
 use cgmath::{InnerSpace, Matrix4, Vector3, Vector4};
+use slotmap::{new_key_type, SlotMap};
 use std::ops::{Index, IndexMut};
 
 pub fn translation(v: Vector3<f64>) -> Matrix4<f64> {
@@ -78,7 +79,7 @@ fn generate_inner<T, F: FnMut(&T, Side, State) -> T>(
     radius: usize,
     insert: &mut F,
 ) {
-    let side = if state != 0o100000 {
+    let side = if state != ORIGIN {
         match state & 0o7 {
             0 => Side::NegX,
             1 => Side::PosX,
@@ -94,58 +95,147 @@ fn generate_inner<T, F: FnMut(&T, Side, State) -> T>(
 
     let this = insert(parent, side, state);
     if radius > 0 {
-        generate_child(state, |state| {
-            generate_inner(&this, state, radius - 1, insert)
-        });
+        branch(state).for_each(|state| generate_inner(&this, state, radius - 1, insert));
     }
 }
 
-pub fn generate_child<F: FnMut(State)>(state: State, mut insert: F) {
-    if state & 0o100000 != 0 {
-        match state & 0o77777 {
-            0 => {
-                insert(0o00000);
-                insert(0o11111);
-                insert(0o22222);
-                insert(0o33333);
-                insert(0o44444);
-                insert(0o55555);
-            }
-            _ => {}
-        }
-    } else {
-        let mut child = [true; 6];
-        child[(state as usize & 0o7) ^ 1] = false;
-        child[(state as usize >> 3 & 0o7) ^ 1] = false;
-        child[(state as usize >> 6 & 0o7) ^ 1] = false;
-
-        let state = state << 3 & 0o77777;
-        for (i, child) in child.into_iter().enumerate() {
-            if child {
-                insert(state | i as State);
-            }
-        }
-    }
-}
-
-pub fn generate<T, F: FnMut(&T, Side, State) -> T>(
-    parent: &T,
-    state: State,
-    radius: usize,
-    mut insert: F,
-) {
-    generate_inner(parent, state, radius, &mut insert);
-}
-
-pub fn generate_origin<T, F: FnMut(&T, Side, State) -> T>(
-    origin: &T,
-    radius: usize,
-    mut insert: F,
-) {
+fn generate_origin<T, F: FnMut(&T, Side, State) -> T>(origin: &T, radius: usize, mut insert: F) {
     if radius > 0 {
-        generate_child(0o100000, |state| {
-            generate_inner(origin, state, radius - 1, &mut insert)
+        branch(ORIGIN).for_each(|state| generate_inner(origin, state, radius - 1, &mut insert));
+    }
+}
+
+pub const ORIGIN: State = 0o177777;
+
+pub fn branch(state: State) -> impl Iterator<Item = State> {
+    let child = if state == ORIGIN {
+        [
+            Some(0o000),
+            Some(0o111),
+            Some(0o222),
+            Some(0o333),
+            Some(0o444),
+            Some(0o555),
+        ]
+    } else {
+        let mut branch = [true; 6];
+        branch[(state as usize & 0o7) ^ 1] = false;
+        branch[(state as usize >> 3 & 0o7) ^ 1] = false;
+        if state >> 6 & 0o7 < state >> 3 & 0o7 {
+            branch[(state as usize >> 6 & 0o7) ^ 1] = false;
+        }
+
+        let state = state << 3 & 0o777;
+        let mut child = [None; 6];
+        for (i, child) in child.iter_mut().enumerate() {
+            if branch[i] {
+                *child = Some(state | i as State);
+            }
+        }
+        child
+    };
+    child.into_iter().flatten()
+}
+
+new_key_type! {
+    pub struct Cell;
+}
+
+struct CellData {
+    links: [Cell; 6],
+    state: u16,
+    is_leaf: bool,
+}
+
+pub struct Space {
+    cells: SlotMap<Cell, CellData>,
+}
+impl Space {
+    pub fn new() -> (Self, Cell) {
+        let mut cells = SlotMap::with_key();
+        let origin = cells.insert(CellData {
+            links: [Cell::default(); 6],
+            state: ORIGIN,
+            is_leaf: true,
         });
+        (Space { cells }, origin)
+    }
+
+    pub fn branch(&mut self, cell: Cell) -> impl Iterator<Item = (Side, Cell)> {
+        let branches: Vec<_> = if self.cells[cell].is_leaf {
+            self.cells[cell].is_leaf = false;
+            branch(self.cells[cell].state)
+                .map(move |state| {
+                    let mut links = [Cell::default(); 6];
+                    links[(state as usize & 0o7) ^ 1] = cell;
+                    let link = self.cells.insert(CellData {
+                        links,
+                        state,
+                        is_leaf: true,
+                    });
+                    self.cells[cell].links[state as usize & 0o7] = link;
+                    let side = match state & 0o7 {
+                        0 => Side::NegX,
+                        1 => Side::PosX,
+                        2 => Side::NegY,
+                        3 => Side::PosY,
+                        4 => Side::NegZ,
+                        5 => Side::PosZ,
+                        _ => unreachable!(),
+                    };
+                    (side, link)
+                })
+                .collect()
+        } else {
+            branch(self.cells[cell].state)
+                .map(|state| {
+                    let link = self.cells[cell].links[state as usize & 0o7];
+                    let side = match state & 0o7 {
+                        0 => Side::NegX,
+                        1 => Side::PosX,
+                        2 => Side::NegY,
+                        3 => Side::PosY,
+                        4 => Side::NegZ,
+                        5 => Side::PosZ,
+                        _ => unreachable!(),
+                    };
+                    (side, link)
+                })
+                .collect()
+        };
+        branches.into_iter()
+    }
+
+    pub fn is_leaf(&self, cell: Cell) -> bool {
+        self.cells[cell].is_leaf
+    }
+
+    pub fn parent(&self, cell: Cell) -> Cell {
+        let cell = &self.cells[cell];
+        if cell.state == ORIGIN {
+            Cell::default()
+        } else {
+            cell.links[(cell.state as usize & 0o7) ^ 1]
+        }
+    }
+
+    pub fn generate<T, I, N>(&mut self, cell: Cell, value: T, mut insert: I, mut next: N)
+    where
+        I: FnMut(Cell, &T) -> bool,
+        N: FnMut(Side, Cell, &T) -> T,
+    {
+        fn inner<T, I, N>(space: &mut Space, cell: Cell, value: T, insert: &mut I, next: &mut N)
+        where
+            I: FnMut(Cell, &T) -> bool,
+            N: FnMut(Side, Cell, &T) -> T,
+        {
+            if insert(cell, &value) {
+                space.branch(cell).for_each(|(side, cell)| {
+                    inner(space, cell, next(side, cell, &value), insert, next);
+                });
+            }
+        }
+        inner(self, cell, value, &mut insert, &mut next);
     }
 }
 
@@ -169,22 +259,20 @@ mod tests {
             pos_z: translation(Vector3::new(0.0, 0.0, STEP)),
         };
 
-        cells.push((Vector4::new(0.0, 0.0, 0.0, 1.0), 0o100000));
+        cells.push((Vector4::new(0.0, 0.0, 0.0, 1.0), ORIGIN));
         generate_origin(&Matrix4::one(), 6, |tr, sd, st| {
             let tr = tr * trs[sd];
-            cells.push((tr.w, st));
-            tr
-        });
-
-        for (i, (a, sa)) in cells.iter().enumerate() {
-            for (b, sb) in cells.iter().skip(i + 1) {
-                let dot = a.truncate().dot(b.truncate()) - a.w * b.w;
+            let v = tr.w;
+            for (o, so) in cells.iter() {
+                let dot = v.truncate().dot(o.truncate()) - v.w * o.w;
                 let dist = (dot * dot - 1.0).abs().sqrt();
                 assert!(
                     dist + 1e-5 >= STEP,
-                    "{sa:04o} overlaps {sb:04o}: {a:?}, {b:?}"
+                    "{st:04o} overlaps {so:04o}: {v:?}, {o:?}"
                 );
             }
-        }
+            cells.push((tr.w, st));
+            tr
+        });
     }
 }
