@@ -141,6 +141,7 @@ new_key_type! {
     pub struct Cell;
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct CellData {
     links: [Cell; 6],
     state: u16,
@@ -161,7 +162,7 @@ impl Space {
         (Space { cells }, origin)
     }
 
-    pub fn branch(&mut self, cell: Cell) -> impl Iterator<Item = (Side, Cell)> {
+    pub fn branch_mut(&mut self, cell: Cell) -> impl Iterator<Item = (Side, Cell)> {
         let branches: Vec<_> = if self.cells[cell].is_leaf {
             self.cells[cell].is_leaf = false;
             branch(self.cells[cell].state)
@@ -230,12 +231,54 @@ impl Space {
             N: FnMut(Side, Cell, &T) -> T,
         {
             if insert(cell, &value) {
-                space.branch(cell).for_each(|(side, cell)| {
+                space.branch_mut(cell).for_each(|(side, cell)| {
                     inner(space, cell, next(side, cell, &value), insert, next);
                 });
             }
         }
         inner(self, cell, value, &mut insert, &mut next);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Walker<'a> {
+    space: &'a Space,
+    cell: Cell,
+}
+impl<'a> Walker<'a> {
+    pub fn new(space: &'a Space, cell: Cell) -> Self {
+        Self { space, cell }
+    }
+
+    fn walk_inner(&mut self, side: u16) {
+        let state = self.space.cells[self.cell].state;
+        if state == ORIGIN
+            || state & 0o7 == side ^ 1
+            || branch(state).any(|state| state & 0o7 == side)
+        {
+            self.cell = self.space.cells[self.cell].links[side as usize];
+        } else {
+            self.cell = self.space.parent(self.cell);
+            self.walk_inner(side);
+            self.walk_inner(state & 0o7);
+            self.walk_inner(side ^ 1);
+        }
+    }
+
+    pub fn walk(&mut self, side: Side) {
+        let side = match side {
+            Side::NegX => 0,
+            Side::PosX => 1,
+            Side::NegY => 2,
+            Side::PosY => 3,
+            Side::NegZ => 4,
+            Side::PosZ => 5,
+        };
+        self.walk_inner(side);
+    }
+
+    pub fn cell(&self) -> Cell {
+        self.cell
     }
 }
 
