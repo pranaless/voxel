@@ -240,28 +240,94 @@ impl Space {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct Orient(u8);
+impl Orient {
+    pub const IDENTITY: Self = Self(0o20);
+    
+    #[rustfmt::skip]
+    const CROSS: [u16; 64] = [
+        7, 7, 5, 4, 2, 3, 7, 7,
+        7, 7, 4, 5, 3, 2, 7, 7,
+        4, 5, 7, 7, 1, 0, 7, 7,
+        5, 4, 7, 7, 0, 1, 7, 7,
+        3, 2, 0, 1, 7, 7, 7, 7,
+        2, 3, 1, 0, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7,
+    ];
+
+    fn map(&self, side: u16) -> u16 {
+        (match side >> 1 {
+            0 => self.0 as u16 & 0o7,
+            1 => self.0 as u16 >> 3,
+            2 => Self::CROSS[self.0 as usize],
+            _ => unreachable!(),
+        }) ^ (side & 1)
+    }
+
+    fn unmap(&self, side: u16) -> u16 {
+        let x = self.0 as u16 & 0o7;
+        let y = self.0 as u16 >> 3;
+        let z = Self::CROSS[self.0 as usize];
+        [x, x ^ 1, y, y ^ 1, z, z ^ 1]
+            .into_iter()
+            .position(|v| v == side)
+            .unwrap() as u16
+    }
+
+    fn rotate(&mut self, rot: u16) {
+        #[rustfmt::skip]
+        const ROTATION: [u8; 64] = [
+            0, 1, 5, 4, 2, 3, 7, 7, 
+            0, 1, 4, 5, 3, 2, 7, 7, 
+            4, 5, 2, 3, 1, 0, 7, 7, 
+            5, 4, 2, 3, 0, 1, 7, 7, 
+            3, 3, 0, 1, 4, 5, 7, 7, 
+            2, 2, 1, 0, 4, 5, 7, 7, 
+            7, 7, 7, 7, 7, 7, 7, 7, 
+            7, 7, 7, 7, 7, 7, 7, 7, 
+        ];
+
+        let rot = (rot as usize) << 3;
+        let x = ROTATION[rot | (self.0 as usize & 0o7)];
+        let y = ROTATION[rot | (self.0 as usize >> 3)];
+        self.0 = y << 3 | x;
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Walker<'a> {
     space: &'a Space,
+    orient: Orient,
     cell: Cell,
 }
 impl<'a> Walker<'a> {
     pub fn new(space: &'a Space, cell: Cell) -> Self {
-        Self { space, cell }
+        Self {
+            space,
+            orient: Orient::IDENTITY,
+            cell,
+        }
     }
 
     fn walk_inner(&mut self, side: u16) {
         let state = self.space.cells[self.cell].state;
+        let norm = self.orient.map(side);
+
         if state == ORIGIN
-            || state & 0o7 == side ^ 1
-            || branch(state).any(|state| state & 0o7 == side)
+            || state & 0o7 == norm ^ 1
+            || branch(state).any(|state| state & 0o7 == norm)
         {
-            self.cell = self.space.cells[self.cell].links[side as usize];
+            self.cell = self.space.cells[self.cell].links[norm as usize];
         } else {
+            let pwise = self.orient.unmap(state & 0o7);
             self.cell = self.space.parent(self.cell);
             self.walk_inner(side);
-            self.walk_inner(state & 0o7);
+            self.walk_inner(pwise);
             self.walk_inner(side ^ 1);
+            // TODO
+            self.orient.rotate(Orient::CROSS[(norm as usize) << 3 | (state as usize & 0o7)]);
         }
     }
 
@@ -303,7 +369,7 @@ mod tests {
         };
 
         cells.push((Vector4::new(0.0, 0.0, 0.0, 1.0), ORIGIN));
-        generate_origin(&Matrix4::one(), 6, |tr, sd, st| {
+        generate_origin(&Matrix4::one(), 5, |tr, sd, st| {
             let tr = tr * trs[sd];
             let v = tr.w;
             for (o, so) in cells.iter() {
@@ -317,5 +383,36 @@ mod tests {
             cells.push((tr.w, st));
             tr
         });
+    }
+
+    #[test]
+    fn walker() {
+        let (mut space, origin) = Space::new();
+        space.generate(origin, 3, |_cell, &radius| radius > 0, |_side, _cell, &radius| radius - 1);
+        let mut walker = Walker::new(&space, origin);
+        walker.walk(Side::NegX);
+        walker.walk(Side::PosX);
+        assert_eq!(walker.cell(), origin);
+
+        walker.walk(Side::PosY);
+        walker.walk(Side::NegX);
+        walker.walk(Side::NegY);
+        walker.walk(Side::PosX);
+        walker.walk(Side::PosY);
+        assert_eq!(walker.cell(), origin);
+
+        walker.walk(Side::PosZ);
+        walker.walk(Side::NegX);
+        walker.walk(Side::NegZ);
+        walker.walk(Side::PosX);
+        walker.walk(Side::PosZ);
+        assert_eq!(walker.cell(), origin);
+
+        walker.walk(Side::PosZ);
+        walker.walk(Side::NegY);
+        walker.walk(Side::NegZ);
+        walker.walk(Side::PosY);
+        walker.walk(Side::PosZ);
+        assert_eq!(walker.cell(), origin);
     }
 }
