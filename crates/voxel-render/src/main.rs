@@ -422,7 +422,7 @@ fn main() {
             contents: bytemuck::cast_slice(index),
         });
 
-    let (mut space, origin) = Space::new();
+    let walker = Space::new();
 
     let trs = Sided {
         neg_x: translation(Vector3::new(-STEP, 0.0, 0.0)),
@@ -435,8 +435,7 @@ fn main() {
 
     let mut chunk_data = Vec::new();
 
-    space.generate(
-        origin,
+    walker.generate(
         (Matrix4::one(), 6),
         |_cell, &(tr, radius)| {
             chunk_data.push(ChunkData {
@@ -444,7 +443,7 @@ fn main() {
             });
             radius > 0
         },
-        |side, _cell, (tr, radius)| (tr * trs[side], radius - 1),
+        |side, &(tr, radius)| (tr * trs[side], radius - 1),
     );
 
     let chunk_len = chunk_data.len();

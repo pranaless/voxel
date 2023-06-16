@@ -1674,6 +1674,7 @@ name = "voxel-space"
 version = "0.1.0"
 dependencies = [
  "cgmath",
+ "parking_lot",
  "slotmap",
 ]
 

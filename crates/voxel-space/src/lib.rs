@@ -1,6 +1,10 @@
 use cgmath::{InnerSpace, Matrix4, Vector3, Vector4};
+use parking_lot::Mutex;
 use slotmap::{new_key_type, SlotMap};
-use std::ops::{Index, IndexMut};
+use std::{
+    ops::{Index, IndexMut},
+    sync::Arc,
+};
 
 pub fn translation(v: Vector3<f64>) -> Matrix4<f64> {
     let w = (1.0 + v.magnitude2()).sqrt();
@@ -71,39 +75,7 @@ impl<S> IndexMut<Side> for Sided<S> {
     }
 }
 
-type State = u16;
-
-fn generate_inner<T, F: FnMut(&T, Side, State) -> T>(
-    parent: &T,
-    state: State,
-    radius: usize,
-    insert: &mut F,
-) {
-    let side = if state != ORIGIN {
-        match state & 0o7 {
-            0 => Side::NegX,
-            1 => Side::PosX,
-            2 => Side::NegY,
-            3 => Side::PosY,
-            4 => Side::NegZ,
-            5 => Side::PosZ,
-            _ => return,
-        }
-    } else {
-        return;
-    };
-
-    let this = insert(parent, side, state);
-    if radius > 0 {
-        branch(state).for_each(|state| generate_inner(&this, state, radius - 1, insert));
-    }
-}
-
-fn generate_origin<T, F: FnMut(&T, Side, State) -> T>(origin: &T, radius: usize, mut insert: F) {
-    if radius > 0 {
-        branch(ORIGIN).for_each(|state| generate_inner(origin, state, radius - 1, &mut insert));
-    }
-}
+pub type State = u16;
 
 pub const ORIGIN: State = 0o177777;
 
@@ -144,7 +116,7 @@ new_key_type! {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct CellData {
     links: [Cell; 6],
-    state: u16,
+    state: State,
     is_leaf: bool,
 }
 
@@ -152,185 +124,109 @@ pub struct Space {
     cells: SlotMap<Cell, CellData>,
 }
 impl Space {
-    pub fn new() -> (Self, Cell) {
+    pub fn new() -> Walker {
         let mut cells = SlotMap::with_key();
         let origin = cells.insert(CellData {
             links: [Cell::default(); 6],
             state: ORIGIN,
             is_leaf: true,
         });
-        (Space { cells }, origin)
+        Walker {
+            space: Arc::new(Mutex::new(Space { cells })),
+            state: WalkerState::new(origin),
+        }
     }
 
-    pub fn branch_mut(&mut self, cell: Cell) -> impl Iterator<Item = (Side, Cell)> {
-        let branches: Vec<_> = if self.cells[cell].is_leaf {
+    fn get(&mut self, cell: Cell) -> CellData {
+        if self.cells[cell].is_leaf {
             self.cells[cell].is_leaf = false;
-            branch(self.cells[cell].state)
-                .map(move |state| {
-                    let mut links = [Cell::default(); 6];
-                    links[(state as usize & 0o7) ^ 1] = cell;
-                    let link = self.cells.insert(CellData {
-                        links,
-                        state,
-                        is_leaf: true,
-                    });
-                    self.cells[cell].links[state as usize & 0o7] = link;
-                    let side = match state & 0o7 {
-                        0 => Side::NegX,
-                        1 => Side::PosX,
-                        2 => Side::NegY,
-                        3 => Side::PosY,
-                        4 => Side::NegZ,
-                        5 => Side::PosZ,
-                        _ => unreachable!(),
-                    };
-                    (side, link)
-                })
-                .collect()
-        } else {
-            branch(self.cells[cell].state)
-                .map(|state| {
-                    let link = self.cells[cell].links[state as usize & 0o7];
-                    let side = match state & 0o7 {
-                        0 => Side::NegX,
-                        1 => Side::PosX,
-                        2 => Side::NegY,
-                        3 => Side::PosY,
-                        4 => Side::NegZ,
-                        5 => Side::PosZ,
-                        _ => unreachable!(),
-                    };
-                    (side, link)
-                })
-                .collect()
-        };
-        branches.into_iter()
-    }
-
-    pub fn is_leaf(&self, cell: Cell) -> bool {
-        self.cells[cell].is_leaf
-    }
-
-    pub fn parent(&self, cell: Cell) -> Cell {
-        let cell = &self.cells[cell];
-        if cell.state == ORIGIN {
-            Cell::default()
-        } else {
-            cell.links[(cell.state as usize & 0o7) ^ 1]
-        }
-    }
-
-    pub fn generate<T, I, N>(&mut self, cell: Cell, value: T, mut insert: I, mut next: N)
-    where
-        I: FnMut(Cell, &T) -> bool,
-        N: FnMut(Side, Cell, &T) -> T,
-    {
-        fn inner<T, I, N>(space: &mut Space, cell: Cell, value: T, insert: &mut I, next: &mut N)
-        where
-            I: FnMut(Cell, &T) -> bool,
-            N: FnMut(Side, Cell, &T) -> T,
-        {
-            if insert(cell, &value) {
-                space.branch_mut(cell).for_each(|(side, cell)| {
-                    inner(space, cell, next(side, cell, &value), insert, next);
+            branch(self.cells[cell].state).for_each(|state| {
+                let mut links = [Cell::default(); 6];
+                links[(state as usize & 0o7) ^ 1] = cell;
+                let link = self.cells.insert(CellData {
+                    links,
+                    state,
+                    is_leaf: true,
                 });
-            }
+                self.cells[cell].links[state as usize & 0o7] = link;
+            });
         }
-        inner(self, cell, value, &mut insert, &mut next);
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct Orient(u8);
-impl Orient {
-    pub const IDENTITY: Self = Self(0o20);
-    
-    #[rustfmt::skip]
-    const CROSS: [u16; 64] = [
-        7, 7, 5, 4, 2, 3, 7, 7,
-        7, 7, 4, 5, 3, 2, 7, 7,
-        4, 5, 7, 7, 1, 0, 7, 7,
-        5, 4, 7, 7, 0, 1, 7, 7,
-        3, 2, 0, 1, 7, 7, 7, 7,
-        2, 3, 1, 0, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 7, 7, 7,
-    ];
-
-    fn map(&self, side: u16) -> u16 {
-        (match side >> 1 {
-            0 => self.0 as u16 & 0o7,
-            1 => self.0 as u16 >> 3,
-            2 => Self::CROSS[self.0 as usize],
-            _ => unreachable!(),
-        }) ^ (side & 1)
-    }
-
-    fn unmap(&self, side: u16) -> u16 {
-        let x = self.0 as u16 & 0o7;
-        let y = self.0 as u16 >> 3;
-        let z = Self::CROSS[self.0 as usize];
-        [x, x ^ 1, y, y ^ 1, z, z ^ 1]
-            .into_iter()
-            .position(|v| v == side)
-            .unwrap() as u16
-    }
-
-    fn rotate(&mut self, rot: u16) {
-        #[rustfmt::skip]
-        const ROTATION: [u8; 64] = [
-            0, 1, 5, 4, 2, 3, 7, 7, 
-            0, 1, 4, 5, 3, 2, 7, 7, 
-            4, 5, 2, 3, 1, 0, 7, 7, 
-            5, 4, 2, 3, 0, 1, 7, 7, 
-            3, 3, 0, 1, 4, 5, 7, 7, 
-            2, 2, 1, 0, 4, 5, 7, 7, 
-            7, 7, 7, 7, 7, 7, 7, 7, 
-            7, 7, 7, 7, 7, 7, 7, 7, 
-        ];
-
-        let rot = (rot as usize) << 3;
-        let x = ROTATION[rot | (self.0 as usize & 0o7)];
-        let y = ROTATION[rot | (self.0 as usize >> 3)];
-        self.0 = y << 3 | x;
+        self.cells[cell]
     }
 }
 
 #[derive(Clone, Copy)]
-pub struct Walker<'a> {
-    space: &'a Space,
-    orient: Orient,
+struct WalkerState {
+    orient: u8,
     cell: Cell,
 }
-impl<'a> Walker<'a> {
-    pub fn new(space: &'a Space, cell: Cell) -> Self {
-        Self {
-            space,
-            orient: Orient::IDENTITY,
-            cell,
-        }
+impl WalkerState {
+    pub fn new(cell: Cell) -> Self {
+        WalkerState { orient: 0o20, cell }
     }
 
-    fn walk_inner(&mut self, side: u16) {
-        let state = self.space.cells[self.cell].state;
-        let norm = self.orient.map(side);
+    fn walk(&mut self, space: &mut Space, side: u16) {
+        #[rustfmt::skip]
+        const CROSS: [u16; 64] = [
+            7, 7, 5, 4, 2, 3, 7, 7,
+            7, 7, 4, 5, 3, 2, 7, 7,
+            4, 5, 7, 7, 1, 0, 7, 7,
+            5, 4, 7, 7, 0, 1, 7, 7,
+            3, 2, 0, 1, 7, 7, 7, 7,
+            2, 3, 1, 0, 7, 7, 7, 7,
+            7, 7, 7, 7, 7, 7, 7, 7,
+            7, 7, 7, 7, 7, 7, 7, 7,
+        ];
 
-        if state == ORIGIN
-            || state & 0o7 == norm ^ 1
-            || branch(state).any(|state| state & 0o7 == norm)
+        let orient = {
+            let x = self.orient as u16 & 0o7;
+            let y = self.orient as u16 >> 3;
+            let z = CROSS[self.orient as usize];
+            [x, x ^ 1, y, y ^ 1, z, z ^ 1]
+        };
+
+        let cell = space.get(self.cell);
+        let norm = orient[side as usize];
+        let pnorm = cell.state & 0o7;
+
+        if cell.state == ORIGIN
+            || pnorm ^ 1 == norm
+            || branch(cell.state).any(|state| state & 0o7 == norm)
         {
-            self.cell = self.space.cells[self.cell].links[norm as usize];
+            self.cell = cell.links[norm as usize];
         } else {
-            let pwise = self.orient.unmap(state & 0o7);
-            self.cell = self.space.parent(self.cell);
-            self.walk_inner(side);
-            self.walk_inner(pwise);
-            self.walk_inner(side ^ 1);
-            // TODO
-            self.orient.rotate(Orient::CROSS[(norm as usize) << 3 | (state as usize & 0o7)]);
+            #[rustfmt::skip]
+            const ROTATION: [u8; 64] = [
+                0, 1, 5, 4, 2, 3, 7, 7,
+                0, 1, 4, 5, 3, 2, 7, 7,
+                4, 5, 2, 3, 1, 0, 7, 7,
+                5, 4, 2, 3, 0, 1, 7, 7,
+                3, 3, 0, 1, 4, 5, 7, 7,
+                2, 2, 1, 0, 4, 5, 7, 7,
+                7, 7, 7, 7, 7, 7, 7, 7,
+                7, 7, 7, 7, 7, 7, 7, 7,
+            ];
+
+            let pside = orient.into_iter().position(|v| v == pnorm).unwrap() as u16;
+            self.cell = cell.links[pnorm as usize ^ 1];
+            self.walk(space, side);
+            self.walk(space, pside);
+            self.walk(space, side ^ 1);
+
+            let rot = (CROSS[(norm as usize) << 3 | (pnorm as usize)] as usize) << 3;
+            let x = ROTATION[rot | (self.orient as usize & 0o7)];
+            let y = ROTATION[rot | (self.orient as usize >> 3)];
+            self.orient = y << 3 | x;
         }
     }
+}
 
+#[derive(Clone)]
+pub struct Walker {
+    space: Arc<Mutex<Space>>,
+    state: WalkerState,
+}
+impl Walker {
     pub fn walk(&mut self, side: Side) {
         let side = match side {
             Side::NegX => 0,
@@ -340,11 +236,54 @@ impl<'a> Walker<'a> {
             Side::NegZ => 4,
             Side::PosZ => 5,
         };
-        self.walk_inner(side);
+        self.state.walk(&mut self.space.lock(), side);
     }
 
     pub fn cell(&self) -> Cell {
-        self.cell
+        self.state.cell
+    }
+
+    pub fn generate<T, I, N>(&self, value: T, mut insert: I, mut next: N)
+    where
+        I: FnMut(Cell, &T) -> bool,
+        N: FnMut(Side, &T) -> T,
+    {
+        fn inner<T, I, N>(
+            space: &Mutex<Space>,
+            walker: WalkerState,
+            state: State,
+            value: T,
+            insert: &mut I,
+            next: &mut N,
+        ) where
+            I: FnMut(Cell, &T) -> bool,
+            N: FnMut(Side, &T) -> T,
+        {
+            if insert(walker.cell, &value) {
+                branch(state).for_each(|state| {
+                    let mut walker = walker;
+                    walker.walk(&mut space.lock(), state & 0o7);
+                    let side = match state & 0o7 {
+                        0 => Side::NegX,
+                        1 => Side::PosX,
+                        2 => Side::NegY,
+                        3 => Side::PosY,
+                        4 => Side::NegZ,
+                        5 => Side::PosZ,
+                        _ => unreachable!(),
+                    };
+                    inner(space, walker, state, next(side, &value), insert, next);
+                });
+            }
+        }
+        inner(
+            &self.space,
+            self.state,
+            ORIGIN,
+            value,
+            &mut insert,
+            &mut next,
+        );
     }
 }
 
@@ -356,7 +295,8 @@ mod tests {
 
     #[test]
     fn generate_no_overlap() {
-        let mut cells = Vec::with_capacity(4096);
+        let walker = Space::new();
+        let mut cells = Vec::<(Vector4<f64>, State)>::new();
 
         const STEP: f64 = 1.272_019_649_514_069;
         let trs = Sided {
@@ -368,28 +308,31 @@ mod tests {
             pos_z: translation(Vector3::new(0.0, 0.0, STEP)),
         };
 
-        cells.push((Vector4::new(0.0, 0.0, 0.0, 1.0), ORIGIN));
-        generate_origin(&Matrix4::one(), 5, |tr, sd, st| {
-            let tr = tr * trs[sd];
-            let v = tr.w;
-            for (o, so) in cells.iter() {
-                let dot = v.truncate().dot(o.truncate()) - v.w * o.w;
-                let dist = (dot * dot - 1.0).abs().sqrt();
-                assert!(
-                    dist + 1e-5 >= STEP,
-                    "{st:04o} overlaps {so:04o}: {v:?}, {o:?}"
-                );
-            }
-            cells.push((tr.w, st));
-            tr
-        });
+        walker.generate(
+            (Matrix4::one(), 5),
+            |cell, &(tr, radius)| {
+                let v = tr.w;
+                let st = walker.space.lock().cells[cell].state;
+                for (o, so) in cells.iter() {
+                    let dot = v.truncate().dot(o.truncate()) - v.w * o.w;
+                    let dist = (dot * dot - 1.0).abs().sqrt();
+                    assert!(
+                        dist + 1e-5 >= STEP,
+                        "{st:04o} overlaps {so:04o}: {v:?}, {o:?}"
+                    );
+                }
+                cells.push((v, st));
+                radius > 0
+            },
+            |side, &(tr, radius)| (tr * trs[side], radius - 1),
+        );
     }
 
     #[test]
     fn walker() {
-        let (mut space, origin) = Space::new();
-        space.generate(origin, 3, |_cell, &radius| radius > 0, |_side, _cell, &radius| radius - 1);
-        let mut walker = Walker::new(&space, origin);
+        let mut walker = Space::new();
+        let origin = walker.cell();
+        walker.generate(3, |_cell, &radius| radius > 0, |_side, &radius| radius - 1);
         walker.walk(Side::NegX);
         walker.walk(Side::PosX);
         assert_eq!(walker.cell(), origin);
