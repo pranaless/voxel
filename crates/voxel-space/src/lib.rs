@@ -93,7 +93,7 @@ pub fn branch(state: State) -> impl Iterator<Item = State> {
         let mut branch = [true; 6];
         branch[(state as usize & 0o7) ^ 1] = false;
         branch[(state as usize >> 3 & 0o7) ^ 1] = false;
-        if state >> 6 & 0o7 < state >> 3 & 0o7 {
+        if state >> 6 & 0o7 > state >> 3 & 0o7 {
             branch[(state as usize >> 6 & 0o7) ^ 1] = false;
         }
 
@@ -120,52 +120,35 @@ struct CellData {
     is_leaf: bool,
 }
 
-pub struct Space {
-    cells: SlotMap<Cell, CellData>,
-}
-impl Space {
-    pub fn new() -> Walker {
-        let mut cells = SlotMap::with_key();
-        let origin = cells.insert(CellData {
-            links: [Cell::default(); 6],
-            state: ORIGIN,
-            is_leaf: true,
-        });
-        Walker {
-            space: Arc::new(Mutex::new(Space { cells })),
-            state: WalkerState::new(origin),
-        }
-    }
-
-    fn get(&mut self, cell: Cell) -> CellData {
-        if self.cells[cell].is_leaf {
-            self.cells[cell].is_leaf = false;
-            branch(self.cells[cell].state).for_each(|state| {
-                let mut links = [Cell::default(); 6];
-                links[(state as usize & 0o7) ^ 1] = cell;
-                let link = self.cells.insert(CellData {
-                    links,
-                    state,
-                    is_leaf: true,
-                });
-                self.cells[cell].links[state as usize & 0o7] = link;
-            });
-        }
-        self.cells[cell]
-    }
-}
-
 #[derive(Clone, Copy)]
 struct WalkerState {
     orient: u8,
     cell: Cell,
 }
 impl WalkerState {
-    pub fn new(cell: Cell) -> Self {
+    fn new(cell: Cell) -> Self {
         WalkerState { orient: 0o20, cell }
     }
 
-    fn walk(&mut self, space: &mut Space, side: u16) {
+    fn get(&self, cells: &mut SlotMap<Cell, CellData>) -> CellData {
+        let cell = self.cell;
+        if cells[cell].is_leaf {
+            cells[cell].is_leaf = false;
+            branch(cells[cell].state).for_each(|state| {
+                let mut links = [Cell::default(); 6];
+                links[(state as usize & 0o7) ^ 1] = cell;
+                let link = cells.insert(CellData {
+                    links,
+                    state,
+                    is_leaf: true,
+                });
+                cells[cell].links[state as usize & 0o7] = link;
+            });
+        }
+        cells[cell]
+    }
+
+    fn walk(&mut self, cells: &mut SlotMap<Cell, CellData>, side: u16) {
         #[rustfmt::skip]
         const CROSS: [u16; 64] = [
             7, 7, 5, 4, 2, 3, 7, 7,
@@ -185,7 +168,7 @@ impl WalkerState {
             [x, x ^ 1, y, y ^ 1, z, z ^ 1]
         };
 
-        let cell = space.get(self.cell);
+        let cell = self.get(cells);
         let norm = orient[side as usize];
         let pnorm = cell.state & 0o7;
 
@@ -209,9 +192,9 @@ impl WalkerState {
 
             let pside = orient.into_iter().position(|v| v == pnorm).unwrap() as u16;
             self.cell = cell.links[pnorm as usize ^ 1];
-            self.walk(space, side);
-            self.walk(space, pside);
-            self.walk(space, side ^ 1);
+            self.walk(cells, side);
+            self.walk(cells, pside);
+            self.walk(cells, side ^ 1);
 
             let rot = (CROSS[(norm as usize) << 3 | (pnorm as usize)] as usize) << 3;
             let x = ROTATION[rot | (self.orient as usize & 0o7)];
@@ -223,10 +206,23 @@ impl WalkerState {
 
 #[derive(Clone)]
 pub struct Walker {
-    space: Arc<Mutex<Space>>,
+    cells: Arc<Mutex<SlotMap<Cell, CellData>>>,
     state: WalkerState,
 }
 impl Walker {
+    pub fn new() -> Walker {
+        let mut cells = SlotMap::with_key();
+        let origin = cells.insert(CellData {
+            links: [Cell::default(); 6],
+            state: ORIGIN,
+            is_leaf: true,
+        });
+        Walker {
+            cells: Arc::new(Mutex::new(cells)),
+            state: WalkerState::new(origin),
+        }
+    }
+
     pub fn walk(&mut self, side: Side) {
         let side = match side {
             Side::NegX => 0,
@@ -236,7 +232,7 @@ impl Walker {
             Side::NegZ => 4,
             Side::PosZ => 5,
         };
-        self.state.walk(&mut self.space.lock(), side);
+        self.state.walk(&mut self.cells.lock(), side);
     }
 
     pub fn cell(&self) -> Cell {
@@ -249,7 +245,7 @@ impl Walker {
         N: FnMut(Side, &T) -> T,
     {
         fn inner<T, I, N>(
-            space: &Mutex<Space>,
+            cells: &Mutex<SlotMap<Cell, CellData>>,
             walker: WalkerState,
             state: State,
             value: T,
@@ -262,7 +258,7 @@ impl Walker {
             if insert(walker.cell, &value) {
                 branch(state).for_each(|state| {
                     let mut walker = walker;
-                    walker.walk(&mut space.lock(), state & 0o7);
+                    walker.walk(&mut cells.lock(), state & 0o7);
                     let side = match state & 0o7 {
                         0 => Side::NegX,
                         1 => Side::PosX,
@@ -272,12 +268,12 @@ impl Walker {
                         5 => Side::PosZ,
                         _ => unreachable!(),
                     };
-                    inner(space, walker, state, next(side, &value), insert, next);
+                    inner(cells, walker, state, next(side, &value), insert, next);
                 });
             }
         }
         inner(
-            &self.space,
+            &self.cells,
             self.state,
             ORIGIN,
             value,
@@ -295,8 +291,8 @@ mod tests {
 
     #[test]
     fn generate_no_overlap() {
-        let walker = Space::new();
-        let mut cells = Vec::<(Vector4<f64>, State)>::new();
+        let walker = Walker::new();
+        let mut cells = Vec::<(Vector4<f64>, Vec<Side>)>::new();
 
         const STEP: f64 = 1.272_019_649_514_069;
         let trs = Sided {
@@ -309,28 +305,33 @@ mod tests {
         };
 
         walker.generate(
-            (Matrix4::one(), 5),
-            |cell, &(tr, radius)| {
+            (Matrix4::one(), Vec::new()),
+            |_cell, (tr, path)| {
                 let v = tr.w;
-                let st = walker.space.lock().cells[cell].state;
-                for (o, so) in cells.iter() {
+                for (o, po) in cells.iter() {
                     let dot = v.truncate().dot(o.truncate()) - v.w * o.w;
                     let dist = (dot * dot - 1.0).abs().sqrt();
                     assert!(
                         dist + 1e-5 >= STEP,
-                        "{st:04o} overlaps {so:04o}: {v:?}, {o:?}"
+                        "{path:?} overlaps {po:?}: {v:?}, {o:?}"
                     );
                 }
-                cells.push((v, st));
-                radius > 0
+                cells.push((v, path.clone()));
+                path.len() < 7
             },
-            |side, &(tr, radius)| (tr * trs[side], radius - 1),
+            |side, (tr, path)| {
+                (tr * trs[side], {
+                    let mut path = path.clone();
+                    path.push(side);
+                    path
+                })
+            },
         );
     }
 
     #[test]
     fn walker() {
-        let mut walker = Space::new();
+        let mut walker = Walker::new();
         let origin = walker.cell();
         walker.generate(3, |_cell, &radius| radius > 0, |_side, &radius| radius - 1);
         walker.walk(Side::NegX);

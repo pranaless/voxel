@@ -6,7 +6,7 @@ use cgmath::{
 use chunk::render::{ChunkMeshBuilder, Face, Vertex};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
-use voxel_space::{translation, Sided, Space};
+use voxel_space::{translation, Sided, Walker};
 use wgpu::{include_wgsl, util::DeviceExt, BufferUsages, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
@@ -422,7 +422,7 @@ fn main() {
             contents: bytemuck::cast_slice(index),
         });
 
-    let walker = Space::new();
+    let walker = Walker::new();
 
     let trs = Sided {
         neg_x: translation(Vector3::new(-STEP, 0.0, 0.0)),
