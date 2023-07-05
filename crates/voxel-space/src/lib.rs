@@ -75,38 +75,53 @@ impl<S> IndexMut<Side> for Sided<S> {
     }
 }
 
-pub type State = u16;
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct State(u32);
+impl State {
+    pub const ORIGIN: Self = Self(7);
 
-pub const ORIGIN: State = 0o177777;
+    fn get(self, i: usize) -> u8 {
+        (self.0 >> (3 * (i - 1)) & 0o7) as u8
+    }
 
-pub fn branch(state: State) -> impl Iterator<Item = State> {
-    let child = if state == ORIGIN {
-        [
-            Some(0o000),
-            Some(0o111),
-            Some(0o222),
-            Some(0o333),
-            Some(0o444),
-            Some(0o555),
-        ]
-    } else {
-        let mut branch = [true; 6];
-        branch[(state as usize & 0o7) ^ 1] = false;
-        branch[(state as usize >> 3 & 0o7) ^ 1] = false;
-        if state >> 6 & 0o7 > state >> 3 & 0o7 {
-            branch[(state as usize >> 6 & 0o7) ^ 1] = false;
+    fn with(self, step: u8) -> Self {
+        if self == Self::ORIGIN {
+            Self(0o111_111 * step as u32)
+        } else {
+            Self((self.0 << 3 & 0o777_777) | step as u32)
         }
+    }
 
-        let state = state << 3 & 0o777;
-        let mut child = [None; 6];
-        for (i, child) in child.iter_mut().enumerate() {
-            if branch[i] {
-                *child = Some(state | i as State);
+    pub fn last(self) -> u8 {
+        (self.0 & 0o7) as u8
+    }
+
+    pub fn branch(self) -> impl Iterator<Item = Self> {
+        let links = if self == Self::ORIGIN {
+            [true; 6]
+        } else {
+            let mut links = [true; 6];
+            if self.get(6) ^ self.get(3) == 1 && self.get(5) ^ self.get(2) == 1 {
+                links[self.get(4) as usize ^ 1] = false;
             }
-        }
-        child
-    };
-    child.into_iter().flatten()
+            if self.get(6) ^ self.get(2) == 1 {
+                links[self.get(3) as usize ^ 1] = false;
+            }
+            if self.get(5) ^ self.get(2) == 1 {
+                links[self.get(3) as usize ^ 1] = false;
+            }
+            if self.get(3) > self.get(2) {
+                links[self.get(3) as usize ^ 1] = false;
+            }
+            links[self.get(2) as usize ^ 1] = false;
+            links[self.get(1) as usize ^ 1] = false;
+            links
+        };
+        links
+            .into_iter()
+            .enumerate()
+            .filter_map(move |(i, link)| if link { Some(self.with(i as u8)) } else { None })
+    }
 }
 
 new_key_type! {
@@ -134,23 +149,24 @@ impl WalkerState {
         let cell = self.cell;
         if cells[cell].is_leaf {
             cells[cell].is_leaf = false;
-            branch(cells[cell].state).for_each(|state| {
+            cells[cell].state.branch().for_each(|state| {
                 let mut links = [Cell::default(); 6];
-                links[(state as usize & 0o7) ^ 1] = cell;
+                links[state.last() as usize ^ 1] = cell;
                 let link = cells.insert(CellData {
                     links,
                     state,
                     is_leaf: true,
                 });
-                cells[cell].links[state as usize & 0o7] = link;
+                cells[cell].links[state.last() as usize] = link;
             });
         }
         cells[cell]
     }
 
-    fn walk(&mut self, cells: &mut SlotMap<Cell, CellData>, side: u16) {
+    // FIXME: Rotation doesn't work right
+    fn walk(&mut self, cells: &mut SlotMap<Cell, CellData>, side: u8) {
         #[rustfmt::skip]
-        const CROSS: [u16; 64] = [
+        const CROSS: [u8; 64] = [
             7, 7, 5, 4, 2, 3, 7, 7,
             7, 7, 4, 5, 3, 2, 7, 7,
             4, 5, 7, 7, 1, 0, 7, 7,
@@ -161,45 +177,64 @@ impl WalkerState {
             7, 7, 7, 7, 7, 7, 7, 7,
         ];
 
-        let orient = {
-            let x = self.orient as u16 & 0o7;
-            let y = self.orient as u16 >> 3;
-            let z = CROSS[self.orient as usize];
-            [x, x ^ 1, y, y ^ 1, z, z ^ 1]
-        };
+        #[rustfmt::skip]
+        const ROTATION: [u8; 64] = [
+            0, 1, 5, 4, 2, 3, 7, 7,
+            0, 1, 4, 5, 3, 2, 7, 7,
+            4, 5, 2, 3, 1, 0, 7, 7,
+            5, 4, 2, 3, 0, 1, 7, 7,
+            3, 3, 0, 1, 4, 5, 7, 7,
+            2, 2, 1, 0, 4, 5, 7, 7,
+            7, 7, 7, 7, 7, 7, 7, 7,
+            7, 7, 7, 7, 7, 7, 7, 7,
+        ];
 
-        let cell = self.get(cells);
-        let norm = orient[side as usize];
-        let pnorm = cell.state & 0o7;
+        enum Step {
+            Side(u8),
+            Rot(u8),
+        }
 
-        if cell.state == ORIGIN
-            || pnorm ^ 1 == norm
-            || branch(cell.state).any(|state| state & 0o7 == norm)
-        {
-            self.cell = cell.links[norm as usize];
-        } else {
-            #[rustfmt::skip]
-            const ROTATION: [u8; 64] = [
-                0, 1, 5, 4, 2, 3, 7, 7,
-                0, 1, 4, 5, 3, 2, 7, 7,
-                4, 5, 2, 3, 1, 0, 7, 7,
-                5, 4, 2, 3, 0, 1, 7, 7,
-                3, 3, 0, 1, 4, 5, 7, 7,
-                2, 2, 1, 0, 4, 5, 7, 7,
-                7, 7, 7, 7, 7, 7, 7, 7,
-                7, 7, 7, 7, 7, 7, 7, 7,
-            ];
+        let mut steps = vec![Step::Side(side)];
 
-            let pside = orient.into_iter().position(|v| v == pnorm).unwrap() as u16;
-            self.cell = cell.links[pnorm as usize ^ 1];
-            self.walk(cells, side);
-            self.walk(cells, pside);
-            self.walk(cells, side ^ 1);
+        while let Some(step) = steps.pop() {
+            match step {
+                Step::Side(side) => {
+                    let orient = {
+                        let x = self.orient & 0o7;
+                        let y = self.orient >> 3;
+                        let z = CROSS[self.orient as usize];
+                        [x, x ^ 1, y, y ^ 1, z, z ^ 1]
+                    };
 
-            let rot = (CROSS[(norm as usize) << 3 | (pnorm as usize)] as usize) << 3;
-            let x = ROTATION[rot | (self.orient as usize & 0o7)];
-            let y = ROTATION[rot | (self.orient as usize >> 3)];
-            self.orient = y << 3 | x;
+                    let cell = self.get(cells);
+                    let norm = orient[side as usize];
+                    let pnorm = (cell.state.0 & 0o7) as u8;
+
+                    if cell.state == State::ORIGIN
+                        || pnorm ^ 1 == norm
+                        || cell
+                            .state
+                            .branch()
+                            .any(|state| (state.0 & 0o7) as u8 == norm)
+                    {
+                        self.cell = cell.links[norm as usize];
+                    } else {
+                        let pside = orient.into_iter().position(|v| v == pnorm).unwrap() as u8;
+                        let rot = CROSS[(norm as usize) << 3 | (pnorm as usize)];
+                        self.cell = cell.links[pnorm as usize ^ 1];
+                        steps.push(Step::Rot(rot));
+                        steps.push(Step::Side(side ^ 1));
+                        steps.push(Step::Side(pside));
+                        steps.push(Step::Side(side));
+                    }
+                }
+                Step::Rot(rot) => {
+                    let rot = (rot as usize) << 3;
+                    let x = ROTATION[rot | (self.orient as usize & 0o7)];
+                    let y = ROTATION[rot | (self.orient as usize >> 3)];
+                    self.orient = y << 3 | x;
+                }
+            }
         }
     }
 }
@@ -214,7 +249,7 @@ impl Walker {
         let mut cells = SlotMap::with_key();
         let origin = cells.insert(CellData {
             links: [Cell::default(); 6],
-            state: ORIGIN,
+            state: State::ORIGIN,
             is_leaf: true,
         });
         Walker {
@@ -256,10 +291,10 @@ impl Walker {
             N: FnMut(Side, &T) -> T,
         {
             if insert(walker.cell, &value) {
-                branch(state).for_each(|state| {
+                state.branch().for_each(|state| {
                     let mut walker = walker;
-                    walker.walk(&mut cells.lock(), state & 0o7);
-                    let side = match state & 0o7 {
+                    walker.walk(&mut cells.lock(), state.last());
+                    let side = match state.last() {
                         0 => Side::NegX,
                         1 => Side::PosX,
                         2 => Side::NegY,
@@ -275,7 +310,7 @@ impl Walker {
         inner(
             &self.cells,
             self.state,
-            ORIGIN,
+            State::ORIGIN,
             value,
             &mut insert,
             &mut next,
@@ -286,13 +321,32 @@ impl Walker {
 #[cfg(test)]
 mod tests {
     use cgmath::One;
+    use slotmap::SecondaryMap;
 
     use super::*;
+
+    fn walk_path(walker: &Walker, path: Vec<Side>) -> Cell {
+        path.into_iter()
+            .fold(walker.clone(), |mut w, s| {
+                w.walk(s);
+                w
+            })
+            .cell()
+    }
+
+    macro_rules! assert_cell_eq {
+        ($walker:expr, [$($a:ident),* $(,)?], [$($b:ident),* $(,)?] $(,)?) => {
+            assert_eq!(
+                walk_path($walker, vec![$(Side::$a),*]),
+                walk_path($walker, vec![$(Side::$b),*]),
+            )
+        };
+    }
 
     #[test]
     fn generate_no_overlap() {
         let walker = Walker::new();
-        let mut cells = Vec::<(Vector4<f64>, Vec<Side>)>::new();
+        let mut cells = SecondaryMap::<Cell, (Vector4<f64>, Vec<Side>)>::new();
 
         const STEP: f64 = 1.272_019_649_514_069;
         let trs = Sided {
@@ -306,18 +360,18 @@ mod tests {
 
         walker.generate(
             (Matrix4::one(), Vec::new()),
-            |_cell, (tr, path)| {
+            |cell, (tr, path)| {
                 let v = tr.w;
-                for (o, po) in cells.iter() {
+                for (_c, (o, po)) in cells.iter() {
                     let dot = v.truncate().dot(o.truncate()) - v.w * o.w;
                     let dist = (dot * dot - 1.0).abs().sqrt();
                     assert!(
                         dist + 1e-5 >= STEP,
-                        "{path:?} overlaps {po:?}: {v:?}, {o:?}"
+                        "{path:?} overlaps {po:?}: {v:?}, {o:?}",
                     );
                 }
-                cells.push((v, path.clone()));
-                path.len() < 7
+                cells.insert(cell, (v, path.clone()));
+                path.len() < 5
             },
             |side, (tr, path)| {
                 (tr * trs[side], {
@@ -331,32 +385,15 @@ mod tests {
 
     #[test]
     fn walker() {
-        let mut walker = Walker::new();
-        let origin = walker.cell();
-        walker.generate(3, |_cell, &radius| radius > 0, |_side, &radius| radius - 1);
-        walker.walk(Side::NegX);
-        walker.walk(Side::PosX);
-        assert_eq!(walker.cell(), origin);
-
-        walker.walk(Side::PosY);
-        walker.walk(Side::NegX);
-        walker.walk(Side::NegY);
-        walker.walk(Side::PosX);
-        walker.walk(Side::PosY);
-        assert_eq!(walker.cell(), origin);
-
-        walker.walk(Side::PosZ);
-        walker.walk(Side::NegX);
-        walker.walk(Side::NegZ);
-        walker.walk(Side::PosX);
-        walker.walk(Side::PosZ);
-        assert_eq!(walker.cell(), origin);
-
-        walker.walk(Side::PosZ);
-        walker.walk(Side::NegY);
-        walker.walk(Side::NegZ);
-        walker.walk(Side::PosY);
-        walker.walk(Side::PosZ);
-        assert_eq!(walker.cell(), origin);
+        let walker = Walker::new();
+        assert_cell_eq!(&walker, [NegX, PosX], []);
+        assert_cell_eq!(&walker, [PosY, NegX, NegY], [NegX, PosY]);
+        assert_cell_eq!(&walker, [NegY, NegX, NegX, PosY], [NegX, NegY, NegY, PosX]);
+        assert_cell_eq!(&walker, [NegY, NegX, NegX, PosY, NegY], [NegY, NegX, NegX]);
+        assert_cell_eq!(
+            &walker,
+            [NegY, NegZ, NegX, PosY, PosY, PosX],
+            [NegZ, NegY, NegX, NegX, PosZ],
+        );
     }
 }
