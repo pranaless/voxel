@@ -5,6 +5,17 @@ struct VertexOutput {
     uv: vec2<f32>,
 }
 
+struct InstanceTransform {
+    @location(2)
+    x: vec4<f32>,
+    @location(3)
+    y: vec4<f32>,
+    @location(4)
+    z: vec4<f32>,
+    @location(5)
+    w: vec4<f32>,
+}
+
 struct Camera {
     viewport: mat4x4<f32>,
     transform: mat4x4<f32>,
@@ -23,12 +34,9 @@ var s_tex: sampler;
 fn vs_main(
     @location(0) pos: vec4<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) tr_x: vec4<f32>,
-    @location(3) tr_y: vec4<f32>,
-    @location(4) tr_z: vec4<f32>,
-    @location(5) tr_w: vec4<f32>,
+    tr: InstanceTransform,
 ) -> VertexOutput {
-    let transform = mat4x4<f32>(tr_x, tr_y, tr_z, tr_w);
+    let transform = mat4x4<f32>(tr.x, tr.y, tr.z, tr.w);
     var output: VertexOutput;
     output.pos = camera.viewport
                * camera.transform

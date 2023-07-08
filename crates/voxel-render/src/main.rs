@@ -1,9 +1,9 @@
-use bytemuck::{Pod, Zeroable};
-use camera::Camera;
 use cgmath::{Deg, InnerSpace, Matrix4, One, PerspectiveFov, Vector2, Vector3, Zero};
 use chunk::render::{ChunkMeshBuilder, Face, Vertex};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
+use voxel_render::camera::Camera;
+use voxel_render::mesh::InstanceTransformData;
 use voxel_space::{translation, Sided, Walker};
 use wgpu::{include_wgsl, util::DeviceExt, Features, TextureUsages};
 use winit::{
@@ -12,7 +12,6 @@ use winit::{
     window::Window,
 };
 
-pub mod camera;
 pub mod chunk;
 
 pub struct RenderState {
@@ -110,40 +109,6 @@ impl PlayerInput {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
-pub struct ChunkData {
-    pub transform: [f32; 16],
-}
-impl ChunkData {
-    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: 64,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &[
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 0,
-                shader_location: 2,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 16,
-                shader_location: 3,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 32,
-                shader_location: 4,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 48,
-                shader_location: 5,
-            },
-        ],
-    };
-}
-
 fn main() {
     env_logger::init();
 
@@ -237,7 +202,7 @@ fn main() {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::LAYOUT, ChunkData::LAYOUT],
+                buffers: &[Vertex::LAYOUT, InstanceTransformData::LAYOUT],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -359,9 +324,7 @@ fn main() {
     walker.generate(
         (Matrix4::one(), 6),
         |_cell, &(tr, radius)| {
-            chunk_data.push(ChunkData {
-                transform: *tr.cast::<f32>().unwrap().as_ref(),
-            });
+            chunk_data.push(InstanceTransformData::new(tr));
             radius > 0
         },
         |side, &(tr, radius)| (tr * trs[side], radius - 1),

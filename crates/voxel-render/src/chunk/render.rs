@@ -15,17 +15,9 @@ impl Vertex {
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: 24,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 16,
-                shader_location: 1,
-            },
+        attributes: &wgpu::vertex_attr_array![
+            0 => Float32x4,
+            1 => Float32x2,
         ],
     };
 }
