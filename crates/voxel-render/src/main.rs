@@ -1,18 +1,18 @@
 use cgmath::{Deg, InnerSpace, Matrix4, One, PerspectiveFov, Vector2, Vector3, Zero};
-use chunk::render::{ChunkMeshBuilder, Face, Vertex};
+use gltf::buffer::Source;
+use gltf::Gltf;
 use parking_lot::Mutex;
+use std::borrow::Cow;
+use std::path::Path;
 use std::time::{Duration, Instant};
-use voxel_render::camera::Camera;
 use voxel_render::mesh::InstanceTransformData;
-use voxel_space::{translation, Sided, Walker};
+use voxel_render::{camera::Camera, mesh::VertexData};
 use wgpu::{include_wgsl, util::DeviceExt, Features, TextureUsages};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
-
-pub mod chunk;
 
 pub struct RenderState {
     device: wgpu::Device,
@@ -109,6 +109,73 @@ impl PlayerInput {
     }
 }
 
+pub struct Primitive {
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+    count: u32,
+}
+
+pub struct Mesh {
+    primitives: Vec<Primitive>,
+}
+
+pub fn load_gltf<P: AsRef<Path>>(device: &wgpu::Device, path: P) -> Vec<Mesh> {
+    let model = Gltf::open(path).unwrap();
+    let buffers = model
+        .buffers()
+        .map(|b| b.source())
+        .map(|s| match s {
+            Source::Bin => model.blob.as_deref().map(Cow::Borrowed),
+            Source::Uri(uri) => {
+                eprintln!("Trying to load from \"{uri}\", which is not supported");
+                None
+            }
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap();
+    model
+        .nodes()
+        .filter_map(|n| n.mesh())
+        .map(|m| {
+            let primitives = m
+                .primitives()
+                .filter_map(|p| {
+                    let reader = p.reader(|b| buffers.get(b.index()).map(|d| &**d));
+                    Some((reader.read_positions()?, reader.read_indices()?))
+                })
+                .map(|(p, i)| {
+                    let vertex = p
+                        .map(|v| {
+                            let v = Vector3::from(v);
+                            let w = 1.0 / (1.0 - v.magnitude2()).sqrt();
+                            (v * w).extend(w).into()
+                        })
+                        .collect::<Vec<[f32; 4]>>();
+                    let index = i.into_u32().collect::<Vec<u32>>();
+
+                    let count = index.len() as u32;
+                    let vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        usage: wgpu::BufferUsages::VERTEX,
+                        contents: bytemuck::cast_slice(&vertex),
+                    });
+                    let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        usage: wgpu::BufferUsages::INDEX,
+                        contents: bytemuck::cast_slice(&index),
+                    });
+                    Primitive {
+                        vertex,
+                        index,
+                        count,
+                    }
+                })
+                .collect();
+            Mesh { primitives }
+        })
+        .collect()
+}
+
 fn main() {
     env_logger::init();
 
@@ -202,7 +269,7 @@ fn main() {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::LAYOUT, InstanceTransformData::LAYOUT],
+                buffers: &[VertexData::LAYOUT, InstanceTransformData::LAYOUT],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -255,80 +322,12 @@ fn main() {
     let mut input = PlayerInput::default();
     let mut tracking = false;
 
-    const SIDE: f32 = 0.485_868_28;
     const STEP: f64 = 1.272_019_649_514_069;
 
-    let faces = {
-        let mut chunk = [[[false; 16]; 16]; 16];
-        for i in 0..16 {
-            for j in 0..2 {
-                for k in 0..2 {
-                    chunk[i][7 + j][7 + k] = true;
-                    chunk[7 + j][i][7 + k] = true;
-                    chunk[7 + j][7 + k][i] = true;
-                }
-            }
-        }
-        let mut faces = [[[Default::default(); 16]; 16]; 16];
-        for x in 0..16 {
-            for y in 0..16 {
-                for z in 0..16 {
-                    let s = chunk[x][y][z];
-                    faces[x][y][z] = Sided {
-                        neg_x: Face(s && (x == 0 || !chunk[x - 1][y][z])),
-                        pos_x: Face(s && (x == 15 || !chunk[x + 1][y][z])),
-                        neg_y: Face(s && (y == 0 || !chunk[x][y - 1][z])),
-                        pos_y: Face(s && (y == 15 || !chunk[x][y + 1][z])),
-                        neg_z: Face(s && (z == 0 || !chunk[x][y][z - 1])),
-                        pos_z: Face(s && (z == 15 || !chunk[x][y][z + 1])),
-                    };
-                }
-            }
-        }
-        faces
-    };
+    let mut mesh = load_gltf(&state.device, "res/cell.glb");
+    let mesh = mesh.pop().unwrap();
 
-    let mut mesh_builder = ChunkMeshBuilder::new(SIDE);
-    mesh_builder.add_chunk(Matrix4::one(), &faces);
-    let (vertex, index) = mesh_builder.data();
-
-    let vertex = state
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            usage: wgpu::BufferUsages::VERTEX,
-            contents: bytemuck::cast_slice(vertex),
-        });
-    let index_len = index.len();
-    let index = state
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            usage: wgpu::BufferUsages::INDEX,
-            contents: bytemuck::cast_slice(index),
-        });
-
-    let walker = Walker::new();
-
-    let trs = Sided {
-        neg_x: translation(Vector3::new(-STEP, 0.0, 0.0)),
-        pos_x: translation(Vector3::new(STEP, 0.0, 0.0)),
-        neg_y: translation(Vector3::new(0.0, -STEP, 0.0)),
-        pos_y: translation(Vector3::new(0.0, STEP, 0.0)),
-        neg_z: translation(Vector3::new(0.0, 0.0, -STEP)),
-        pos_z: translation(Vector3::new(0.0, 0.0, STEP)),
-    };
-
-    let mut chunk_data = Vec::new();
-
-    walker.generate(
-        (Matrix4::one(), 6),
-        |_cell, &(tr, radius)| {
-            chunk_data.push(InstanceTransformData::new(tr));
-            radius > 0
-        },
-        |side, &(tr, radius)| (tr * trs[side], radius - 1),
-    );
+    let chunk_data = vec![InstanceTransformData::new(Matrix4::one())];
 
     let chunk_len = chunk_data.len();
     let chunk_data = state
@@ -519,10 +518,13 @@ fn main() {
                     rpass.set_pipeline(&pipeline);
                     camera_bind_group.set_bind_group(&mut rpass, 0);
                     rpass.set_bind_group(1, &texture_bind_group, &[]);
-                    rpass.set_vertex_buffer(0, vertex.slice(..));
                     rpass.set_vertex_buffer(1, chunk_data.slice(..));
-                    rpass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                    rpass.draw_indexed(0..index_len as _, 0, 0..chunk_len as _);
+                    for primitive in mesh.primitives.iter() {
+                        rpass.set_vertex_buffer(0, primitive.vertex.slice(..));
+                        rpass
+                            .set_index_buffer(primitive.index.slice(..), wgpu::IndexFormat::Uint32);
+                        rpass.draw_indexed(0..primitive.count, 0, 0..chunk_len as _);
+                    }
                 }
                 state.queue.submit(Some(encoder.finish()));
                 frame.present();

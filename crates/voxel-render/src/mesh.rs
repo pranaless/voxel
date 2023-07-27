@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use cgmath::{Matrix4, Vector4};
+use cgmath::Matrix4;
 use wgpu::{VertexBufferLayout, VertexStepMode};
 
 #[repr(C)]
@@ -28,16 +28,10 @@ impl InstanceTransformData {
 
 #[repr(C)]
 #[derive(Clone, Copy, Zeroable, Pod)]
-pub struct VertexPositionData {
+pub struct VertexData {
     position: [f32; 4],
 }
-impl VertexPositionData {
-    pub fn new(position: Vector4<f64>) -> Self {
-        Self {
-            position: *position.cast::<f32>().unwrap().as_ref(),
-        }
-    }
-
+impl VertexData {
     pub const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
         array_stride: 16,
         step_mode: VertexStepMode::Vertex,

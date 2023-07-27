@@ -1,8 +1,8 @@
 struct VertexOutput {
     @builtin(position)
     pos: vec4<f32>,
-    @location(0)
-    uv: vec2<f32>,
+    // @location(0)
+    // uv: vec2<f32>,
 }
 
 struct InstanceTransform {
@@ -33,7 +33,7 @@ var s_tex: sampler;
 @vertex
 fn vs_main(
     @location(0) pos: vec4<f32>,
-    @location(1) uv: vec2<f32>,
+    // @location(1) uv: vec2<f32>,
     tr: InstanceTransform,
 ) -> VertexOutput {
     let transform = mat4x4<f32>(tr.x, tr.y, tr.z, tr.w);
@@ -42,11 +42,11 @@ fn vs_main(
                * camera.transform
                * transform
                * pos;
-    output.uv = uv;
+    // output.uv = uv;
     return output;
 }
 
 @fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    return textureSample(t_tex, s_tex, uv, 0);
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.8, 0.6, 0.4, 1.0);
 }

@@ -7,12 +7,13 @@ edition = "2021"
 bytemuck = { version = "1.13.1", features = ["derive"] }
 cgmath = "0.18.0"
 env_logger = "0.10.0"
+gltf = "1.2.0"
 image = "0.24.6"
 itertools = "0.10.5"
 log = "0.4.17"
 parking_lot = "0.12.1"
 pollster = "0.3.0"
+slotmap = "1.0.6"
+voxel-space = { path = "../voxel-space" }
 wgpu = "0.16.0"
 winit = "0.28.6"
-voxel-space = { path = "../voxel-space" }
-slotmap = "1.0.6"
