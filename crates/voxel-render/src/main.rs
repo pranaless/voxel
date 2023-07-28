@@ -110,16 +110,25 @@ impl PlayerInput {
 }
 
 pub struct Primitive {
-    vertex: wgpu::Buffer,
-    index: wgpu::Buffer,
+    buffers: Vec<wgpu::Buffer>,
+    index: Option<(wgpu::Buffer, wgpu::IndexFormat)>,
     count: u32,
 }
-
-pub struct Mesh {
-    primitives: Vec<Primitive>,
+impl Primitive {
+    pub fn draw<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>, instances: u32) {
+        for (i, buffer) in self.buffers.iter().enumerate() {
+            rpass.set_vertex_buffer(i as u32, buffer.slice(..));
+        }
+        if let Some((index, format)) = self.index.as_ref() {
+            rpass.set_index_buffer(index.slice(..), *format);
+            rpass.draw_indexed(0..self.count, 0, 0..instances);
+        } else {
+            rpass.draw(0..self.count, 0..instances);
+        }
+    }
 }
 
-pub fn load_gltf<P: AsRef<Path>>(device: &wgpu::Device, path: P) -> Vec<Mesh> {
+pub fn load_gltf<P: AsRef<Path>>(device: &wgpu::Device, path: P) {
     let model = Gltf::open(path).unwrap();
     let buffers = model
         .buffers()
@@ -133,47 +142,6 @@ pub fn load_gltf<P: AsRef<Path>>(device: &wgpu::Device, path: P) -> Vec<Mesh> {
         })
         .collect::<Option<Vec<_>>>()
         .unwrap();
-    model
-        .nodes()
-        .filter_map(|n| n.mesh())
-        .map(|m| {
-            let primitives = m
-                .primitives()
-                .filter_map(|p| {
-                    let reader = p.reader(|b| buffers.get(b.index()).map(|d| &**d));
-                    Some((reader.read_positions()?, reader.read_indices()?))
-                })
-                .map(|(p, i)| {
-                    let vertex = p
-                        .map(|v| {
-                            let v = Vector3::from(v);
-                            let w = 1.0 / (1.0 - v.magnitude2()).sqrt();
-                            (v * w).extend(w).into()
-                        })
-                        .collect::<Vec<[f32; 4]>>();
-                    let index = i.into_u32().collect::<Vec<u32>>();
-
-                    let count = index.len() as u32;
-                    let vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: None,
-                        usage: wgpu::BufferUsages::VERTEX,
-                        contents: bytemuck::cast_slice(&vertex),
-                    });
-                    let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: None,
-                        usage: wgpu::BufferUsages::INDEX,
-                        contents: bytemuck::cast_slice(&index),
-                    });
-                    Primitive {
-                        vertex,
-                        index,
-                        count,
-                    }
-                })
-                .collect();
-            Mesh { primitives }
-        })
-        .collect()
 }
 
 fn main() {
@@ -324,8 +292,8 @@ fn main() {
 
     const STEP: f64 = 1.272_019_649_514_069;
 
-    let mut mesh = load_gltf(&state.device, "res/cell.glb");
-    let mesh = mesh.pop().unwrap();
+    // let mut mesh = load_gltf(&state.device, "res/cell.glb");
+    // let mesh = mesh.pop().unwrap();
 
     let chunk_data = vec![InstanceTransformData::new(Matrix4::one())];
 
@@ -519,12 +487,9 @@ fn main() {
                     camera_bind_group.set_bind_group(&mut rpass, 0);
                     rpass.set_bind_group(1, &texture_bind_group, &[]);
                     rpass.set_vertex_buffer(1, chunk_data.slice(..));
-                    for primitive in mesh.primitives.iter() {
-                        rpass.set_vertex_buffer(0, primitive.vertex.slice(..));
-                        rpass
-                            .set_index_buffer(primitive.index.slice(..), wgpu::IndexFormat::Uint32);
-                        rpass.draw_indexed(0..primitive.count, 0, 0..chunk_len as _);
-                    }
+                    // for primitive in mesh.primitives.iter() {
+                    //     primitive.draw(&mut rpass, chunk_len);
+                    // }
                 }
                 state.queue.submit(Some(encoder.finish()));
                 frame.present();
