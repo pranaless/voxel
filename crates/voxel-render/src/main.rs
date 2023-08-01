@@ -4,10 +4,12 @@ use gltf::Gltf;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use voxel_render::mesh::InstanceTransformData;
 use voxel_render::{camera::Camera, mesh::VertexData};
 use wgpu::{include_wgsl, util::DeviceExt, Features, TextureUsages};
+use wgpu::{IndexFormat, RenderPass};
 use winit::{
     event::{DeviceEvent, Event, KeyboardInput, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -54,7 +56,7 @@ impl CameraBindGroup {
         CameraBindGroup(bind_group)
     }
 
-    pub fn set_bind_group<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>, index: u32) {
+    pub fn set_bind_group<'a>(&'a self, rpass: &mut RenderPass<'a>, index: u32) {
         rpass.set_bind_group(index, &self.0, &[]);
     }
 }
@@ -109,39 +111,73 @@ impl PlayerInput {
     }
 }
 
-pub struct Primitive {
-    buffers: Vec<wgpu::Buffer>,
-    index: Option<(wgpu::Buffer, wgpu::IndexFormat)>,
-    count: u32,
+struct BufferRef {
+    buffer: Arc<wgpu::Buffer>,
+    offset: u64,
 }
-impl Primitive {
-    pub fn draw<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>, instances: u32) {
-        for (i, buffer) in self.buffers.iter().enumerate() {
-            rpass.set_vertex_buffer(i as u32, buffer.slice(..));
-        }
-        if let Some((index, format)) = self.index.as_ref() {
-            rpass.set_index_buffer(index.slice(..), *format);
-            rpass.draw_indexed(0..self.count, 0, 0..instances);
+impl BufferRef {
+    pub fn slice(&self) -> wgpu::BufferSlice<'_> {
+        self.buffer.slice(self.offset..)
+    }
+}
+
+struct Mesh {
+    index: Option<(IndexFormat, BufferRef)>,
+    count: u32,
+    instances: u32,
+}
+impl Mesh {
+    pub fn draw<'a>(&'a self, rpass: &mut RenderPass<'a>) {
+        if let Some((format, buffer)) = self.index.as_ref() {
+            rpass.set_index_buffer(buffer.slice(), *format);
+            rpass.draw_indexed(0..self.count, 0, 0..self.instances);
         } else {
-            rpass.draw(0..self.count, 0..instances);
+            rpass.draw(0..self.count, 0..self.instances);
         }
     }
 }
 
+pub struct MeshRenderer {
+    slots: Vec<u32>,
+    buffers: Vec<BufferRef>,
+    meshes: Vec<Mesh>,
+}
+impl MeshRenderer {
+    pub fn draw<'a>(&'a self, rpass: &mut RenderPass<'a>) {
+        self.buffers
+            .chunks(self.slots.len())
+            .zip(self.meshes.iter())
+            .for_each(|(buffers, mesh)| {
+                self.slots
+                    .iter()
+                    .zip(buffers)
+                    .for_each(|(&slot, buffer)| rpass.set_vertex_buffer(slot, buffer.slice()));
+
+                mesh.draw(rpass);
+            });
+    }
+}
+
 pub fn load_gltf<P: AsRef<Path>>(device: &wgpu::Device, path: P) {
-    let model = Gltf::open(path).unwrap();
-    let buffers = model
+    let gltf = Gltf::open(path).unwrap();
+    let buffers = gltf
         .buffers()
         .map(|b| b.source())
         .map(|s| match s {
-            Source::Bin => model.blob.as_deref().map(Cow::Borrowed),
+            Source::Bin => gltf.blob.as_deref().map(Cow::Borrowed),
             Source::Uri(uri) => {
-                eprintln!("Trying to load from \"{uri}\", which is not supported");
+                log::error!("Trying to load from \"{uri}\", which is not supported");
                 None
             }
         })
         .collect::<Option<Vec<_>>>()
-        .unwrap();
+        .expect("failed to load all buffers");
+
+    gltf.meshes().flat_map(|m| m.primitives()).for_each(|m| {
+        // 1. gen vertex attrib layout
+        // 2. upload required buffers
+        // 3. assemble mesh
+    });
 }
 
 fn main() {
