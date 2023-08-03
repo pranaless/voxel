@@ -1,8 +1,11 @@
 use cgmath::{Deg, InnerSpace, Matrix4, One, PerspectiveFov, Vector2, Vector3, Zero};
 use gltf::buffer::Source;
-use gltf::Gltf;
+use gltf::{Gltf, Semantic};
+use itertools::Itertools;
 use parking_lot::Mutex;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -158,6 +161,30 @@ impl MeshRenderer {
     }
 }
 
+struct VertexAttributes<'a> {
+    view: gltf::buffer::View<'a>,
+    offset: u32,
+    stride: u64,
+    attributes: Vec<gltf::Attribute<'a>>,
+}
+impl fmt::Debug for VertexAttributes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VertexAttributes")
+            .field("view", &self.view.index())
+            .field("offset", &self.offset)
+            .field("stride", &self.stride)
+            .field("attributes", &self.attributes.len())
+            .finish()?;
+        f.write_str(" ")?;
+        self.attributes
+            .iter()
+            .fold(&mut f.debug_list(), |f, v| {
+                f.entry(&(v.1.offset(), v.0.clone(), v.1.data_type(), v.1.dimensions()))
+            })
+            .finish()
+    }
+}
+
 pub fn load_gltf<P: AsRef<Path>>(device: &wgpu::Device, path: P) {
     let gltf = Gltf::open(path).unwrap();
     let buffers = gltf
@@ -173,8 +200,48 @@ pub fn load_gltf<P: AsRef<Path>>(device: &wgpu::Device, path: P) {
         .collect::<Option<Vec<_>>>()
         .expect("failed to load all buffers");
 
+    let mut buffer_views = HashMap::new();
+    let get_view = |view: gltf::buffer::View, usage| {
+        buffer_views
+            .entry(view.index())
+            .or_insert_with(|| {
+                let contents = &buffers[view.index()][view.offset()..][..view.length()];
+                Arc::new(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents,
+                        usage,
+                    }),
+                )
+            })
+            .clone()
+    };
+
     gltf.meshes().flat_map(|m| m.primitives()).for_each(|m| {
         // 1. gen vertex attrib layout
+        m.attributes()
+            .filter_map(|(s, a)| Some((a.view()?, s, a)))
+            .sorted_unstable_by_key(|(v, _, a)| (v.index(), a.offset()))
+            .map(|(v, s, a)| {
+                let stride = v.stride().unwrap_or_else(|| a.size()) as u64;
+                VertexAttributes {
+                    view: v,
+                    offset: a.offset() as u32,
+                    stride,
+                    attributes: vec![(s, a)],
+                }
+            })
+            .coalesce(|mut a, b| {
+                if a.view.index() == b.view.index() && b.offset - a.offset < a.stride as u32 {
+                    a.attributes.extend_from_slice(&b.attributes);
+                    Ok(a)
+                } else {
+                    Err((a, b))
+                }
+            })
+            .for_each(|va| {
+                println!("{va:?}");
+            });
         // 2. upload required buffers
         // 3. assemble mesh
     });
@@ -328,7 +395,8 @@ fn main() {
 
     const STEP: f64 = 1.272_019_649_514_069;
 
-    // let mut mesh = load_gltf(&state.device, "res/cell.glb");
+    // let mut mesh =
+    load_gltf(&state.device, "res/cell.glb");
     // let mesh = mesh.pop().unwrap();
 
     let chunk_data = vec![InstanceTransformData::new(Matrix4::one())];
